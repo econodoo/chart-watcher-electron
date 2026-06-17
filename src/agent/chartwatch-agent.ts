@@ -263,36 +263,62 @@
   // ── Crop ──
   function doCrop(cascade: SelectorStep[]): void {
     // Remove any previous crop
-    document.getElementById('__cw_crop__')?.remove();
+    undoCrop();
 
     const el = resolve(cascade);
-    if (!el) { send({ evt: 'cropFailed', reason: 'Element not found with saved selector' }); return; }
+    if (!el) { send({ evt: 'cropFailed', reason: 'Element not found' }); return; }
 
-    const style = document.createElement('style'); style.id = '__cw_crop__';
-    // Hide everything, then show only the target and its ancestors
-    style.textContent = `
-      body > *:not(style):not(script):not([id^="__cw_"]) { visibility: hidden !important; position: absolute !important; }
-      body { margin: 0 !important; padding: 0 !important; overflow: auto !important; }
-    `;
-    document.head.appendChild(style);
+    // Strategy: walk from target UP to body.
+    // At each level, hide ALL siblings (display:none).
+    // This leaves only the target's ancestor chain visible.
+    const hiddenEls: HTMLElement[] = [];
+    let current: Element | null = el;
 
-    // Walk up from target, making each ancestor visible
-    let cur: Element | null = el;
-    while (cur && cur !== document.documentElement) {
-      const htmlEl = cur as HTMLElement;
-      htmlEl.style.setProperty('visibility', 'visible', 'important');
-      htmlEl.style.setProperty('position', 'relative', 'important');
-      htmlEl.style.setProperty('display', '', '');  // Reset to default
-      cur = cur.parentElement;
+    while (current && current.parentElement) {
+      const parent: Element = current.parentElement;
+      const siblings: Element[] = Array.from(parent.children);
+      for (const sibling of siblings) {
+        if (sibling === current) continue;
+        if (sibling.tagName === 'STYLE' || sibling.tagName === 'SCRIPT' || sibling.tagName === 'LINK') continue;
+        if ((sibling.id || '').startsWith('__cw_')) continue;
+        const htmlSib = sibling as HTMLElement;
+        htmlSib.dataset.cwHidden = 'true';
+        htmlSib.style.setProperty('display', 'none', 'important');
+        hiddenEls.push(htmlSib);
+      }
+      if (parent === document.body || parent === document.documentElement) break;
+      current = parent;
     }
 
-    // Make all children of the target visible too
-    el.querySelectorAll('*').forEach(child => {
-      (child as HTMLElement).style.setProperty('visibility', 'visible', 'important');
-    });
+    // Clean up body
+    document.body.style.setProperty('margin', '0', 'important');
+    document.body.style.setProperty('padding', '0', 'important');
+    document.body.style.setProperty('overflow', 'auto', 'important');
 
+    // Mark target for identification
+    (el as HTMLElement).dataset.cwCropTarget = 'true';
+
+    // Scroll into view
     el.scrollIntoView({ block: 'start' });
-    send({ evt: 'cropApplied' });
+
+    // Store hidden elements for undo
+    (window as any).__cw_hidden__ = hiddenEls;
+
+    send({ evt: 'cropApplied', count: hiddenEls.length });
+  }
+
+  function undoCrop(): void {
+    const hidden: HTMLElement[] = (window as any).__cw_hidden__ || [];
+    for (const el of hidden) {
+      el.style.removeProperty('display');
+      delete el.dataset.cwHidden;
+    }
+    (window as any).__cw_hidden__ = [];
+    document.querySelector('[data-cw-crop-target]')?.removeAttribute('data-cw-crop-target');
+    document.body.style.removeProperty('margin');
+    document.body.style.removeProperty('padding');
+    document.body.style.removeProperty('overflow');
+    document.getElementById('__cw_crop__')?.remove();
   }
 
   // ── Bridge ──
@@ -304,11 +330,12 @@
     switch (m.cmd) {
       case 'observe': observed.set(m.stickerId, { stickerId: m.stickerId, cascade: m.cascade, element: resolve(m.cascade) }); checkObs(); break;
       case 'unobserve': observed.delete(m.stickerId); break;
-      case 'enterPick': enterPick(); break;
+      case 'enterPick': undoCrop(); enterPick(); break;
       case 'exitPick': exitPick(); break;
       case 'showSelection': if (m.cascade) showStaticHighlight(m.cascade); break;
       case 'previewCrop': if (m.cascade) doCrop(m.cascade); break;
       case 'applyCrop': if (m.cascade) doCrop(m.cascade); break;
+      case 'undoCrop': undoCrop(); break;
     }
   });
 
