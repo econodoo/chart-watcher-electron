@@ -255,11 +255,14 @@ function embedWebview(card: HTMLElement, comp: Component, zoom: number): void {
 }
 
 async function applyCropCss(wv: any, comp: Component): Promise<void> {
-  const sels = JSON.parse(comp.selectors || '[]'); if (sels.length === 0) return;
-  const cascade = sels[0]; let css = '';
-  for (const s of cascade) { if (s.strategy === 'css') { css = s.expression; break; } if (s.strategy === 'id') { css = '#' + s.expression; break; } }
-  if (!css) return;
-  try { await wv.executeJavaScript(`(function(){var t=document.querySelector('${css.replace(/'/g,"\\'")}');if(!t)return;var s=document.createElement('style');s.textContent='body>*:not(style){visibility:hidden!important;height:0!important;overflow:hidden!important}body{margin:0!important;padding:0!important}';document.head.appendChild(s);var e=t;while(e&&e!==document.documentElement){e.style.setProperty('visibility','visible','important');e.style.setProperty('height','auto','important');e.style.setProperty('overflow','visible','important');e=e.parentElement;}t.scrollIntoView({block:'start'});})();`); } catch {}
+  const sels = JSON.parse(comp.selectors || '[]');
+  if (sels.length === 0) return;
+  // Inject the agent first (it handles the crop command)
+  await injectAgent(wv, 'crop-card');
+  // Send crop command via the preload bridge
+  setTimeout(() => {
+    try { wv.send('agent-command', { cmd: 'applyCrop', cascade: sels[0] }); } catch {}
+  }, 500);
 }
 
 function sendCloneObserve(comp: Component): void {
@@ -472,13 +475,16 @@ function openConfigureWorkspace(p: Placement, comp: Component): void {
       if (!agentReady) { toast('Wait for page to finish loading', 'error'); return; }
 
       const s = document.getElementById('ws-status');
-      if (s) s.textContent = '🎯 Hover to highlight · ↑↓ parent/child · ←→ siblings · Enter to select · Esc to cancel';
+      if (s) s.textContent = '🎯 Hover to highlight · Click to lock · ↑↓←→ to navigate · Enter to confirm · Esc to cancel';
       pickBtn.disabled = true;
-      pickBtn.textContent = '🎯 Picking… (hover + arrows + Enter)';
+      pickBtn.textContent = '🎯 Picking… (hover → click → arrows → Enter)';
       pickingActive = true;
 
       // Enter picker mode in the webview
       wv.send('agent-command', { cmd: 'enterPick' });
+
+      // CRITICAL: focus the webview so keyboard events reach the agent
+      setTimeout(() => { try { wv.focus(); } catch {} }, 200);
 
       const handler = (ev: any) => {
         if (ev.channel !== 'agent-message') return;
@@ -491,11 +497,12 @@ function openConfigureWorkspace(p: Placement, comp: Component): void {
           window.api.upsertComponent(comp);
           pickBtn.disabled = false;
           pickBtn.textContent = '🎯 Pick Element to Crop';
-          const cssExpr = msg.cascade?.find((s: any) => s.strategy === 'css')?.expression || 'element';
-          if (s) s.textContent = `✓ Cropped to: ${cssExpr} — Click Done to apply, or pick again`;
+          const cssExpr = msg.cascade?.find((s: any) => s.strategy === 'css')?.expression || '';
+          const xpathExpr = msg.cascade?.find((s: any) => s.strategy === 'xpath')?.expression || '';
+          if (s) s.textContent = `✓ Selected: css="${cssExpr}" · xpath="${xpathExpr}"`;
           toast(`Element selected: ${cssExpr}`, 'success');
-          // Apply crop preview in the workspace
-          applyCropCss(wv, comp);
+          // Show crop preview
+          wv.send('agent-command', { cmd: 'previewCrop', cascade: msg.cascade });
         }
 
         if (msg.evt === 'pickCancelled') {
@@ -507,6 +514,21 @@ function openConfigureWorkspace(p: Placement, comp: Component): void {
         }
       };
       wv.addEventListener('ipc-message', handler);
+    });
+
+    // Show existing selection when opening configure for a Crop with saved selectors
+    wv.addEventListener('dom-ready', () => {
+      setTimeout(() => {
+        const sels = JSON.parse(comp.selectors || '[]');
+        if (sels.length > 0 && comp.type === 'Crop') {
+          const cssExpr = sels[0]?.find((s: any) => s.strategy === 'css')?.expression || '';
+          const xpathExpr = sels[0]?.find((s: any) => s.strategy === 'xpath')?.expression || '';
+          const s = document.getElementById('ws-status');
+          if (s && cssExpr) s.textContent = `Current crop: css="${cssExpr}" · xpath="${xpathExpr}" — Click 🎯 to change`;
+          // Highlight the current selection in the page
+          wv.send('agent-command', { cmd: 'showSelection', cascade: sels[0] });
+        }
+      }, 1500); // Wait for agent to be injected
     });
   }
 
