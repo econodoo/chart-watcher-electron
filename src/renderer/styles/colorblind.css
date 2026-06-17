@@ -1,0 +1,36 @@
+:root {
+  --bg-primary: #161616;
+  --bg-toolbar: #1E1E1E;
+  --bg-panel: #1A1A1A;
+  --bg-tab-bar: #141414;
+  --bg-status: #121212;
+  --bg-card: #222222;
+  --bg-card-header: #1C1C1C;
+  --bg-hover: rgba(255,255,255,0.05);
+  --bg-button: rgba(255,255,255,0.07);
+  --bg-button-hover: rgba(255,255,255,0.12);
+  --bg-input: rgba(255,255,255,0.05);
+  --bg-dim: #181818;
+
+  --fg-primary: #E0E0E0;
+  --fg-secondary: #A0A0A0;
+  --fg-dim: #606060;
+
+  --border: #383838;
+  --border-card: #303030;
+
+  /* IBM Design accessible palette */
+  --color-accent: #4589FF;
+  --color-accent-dim: rgba(69,137,255,0.15);
+  --color-up: #4589FF;    /* Blue = up (safe for protanopia/deuteranopia) */
+  --color-down: #FF832B;  /* Orange = down */
+  --color-flat: #A8A8A8;
+
+  --status-ready: #4589FF;
+  --status-loading: #FF832B;
+  --status-error: #DA1E28;
+  --status-stale: #6F6F6F;
+
+  --grid-line: rgba(69,137,255,0.10);
+  --font-main: 'Segoe UI', system-ui, -apple-system, sans-serif;
+}

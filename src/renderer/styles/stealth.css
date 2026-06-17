@@ -1,0 +1,35 @@
+:root {
+  --bg-primary: #1A1A1A;
+  --bg-toolbar: #222222;
+  --bg-panel: #1E1E1E;
+  --bg-tab-bar: #181818;
+  --bg-status: #141414;
+  --bg-card: #252525;
+  --bg-card-header: #202020;
+  --bg-hover: rgba(255,255,255,0.04);
+  --bg-button: rgba(255,255,255,0.06);
+  --bg-button-hover: rgba(255,255,255,0.10);
+  --bg-input: rgba(255,255,255,0.05);
+  --bg-dim: #1C1C1C;
+
+  --fg-primary: #D4D4D4;
+  --fg-secondary: #999999;
+  --fg-dim: #555555;
+
+  --border: #333333;
+  --border-card: #2A2A2A;
+
+  --color-accent: #80CBC4;
+  --color-accent-dim: rgba(128,203,196,0.12);
+  --color-up: #80CBC4;
+  --color-down: #FFB74D;
+  --color-flat: #78909C;
+
+  --status-ready: #80CBC4;
+  --status-loading: #FFB74D;
+  --status-error: #EF5350;
+  --status-stale: #616161;
+
+  --grid-line: rgba(128,203,196,0.08);
+  --font-main: 'Segoe UI', system-ui, -apple-system, sans-serif;
+}
