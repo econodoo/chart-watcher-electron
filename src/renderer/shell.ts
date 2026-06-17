@@ -33,6 +33,7 @@ document.addEventListener('DOMContentLoaded', () => {
   $('#btn-toggle-left').addEventListener('click', () => $('#left-panel').classList.toggle('collapsed'));
   $('#btn-toggle-right').addEventListener('click', () => $('#right-panel').classList.toggle('collapsed'));
   $('#btn-add-tab').addEventListener('click', addTab);
+  $('#btn-recrop').addEventListener('click', recropAll);
   $('#btn-apply-layout').addEventListener('click', applyLayoutChanges);
   $('#btn-delete-card').addEventListener('click', () => selectedCardId && removeCard(selectedCardId));
   $('#btn-configure-card')?.addEventListener('click', () => {
@@ -159,9 +160,20 @@ function renderTabs(): void {
   const tl = $('#tab-list'); tl.innerHTML = '';
   for (const t of tabs) {
     const el = document.createElement('div'); el.className = `tab ${t.id === activeTabId ? 'active' : ''}`;
-    el.innerHTML = `<span>${esc(t.name)}</span>${tabs.length > 1 ? '<button class="tab-close" title="Close tab">×</button>' : ''}`;
-    el.querySelector('span')!.addEventListener('click', () => selectTab(t.id));
-    el.querySelector('.tab-close')?.addEventListener('click', (e) => { e.stopPropagation(); closeTab(t.id); });
+    el.innerHTML = `<span class="tab-name">${esc(t.name)}</span>${tabs.length > 1 ? '<button class="tab-close" title="Close tab">×</button>' : ''}`;
+    // Click = switch tab
+    el.querySelector('.tab-name')!.addEventListener('click', () => selectTab(t.id));
+    // Double-click = rename tab
+    el.querySelector('.tab-name')!.addEventListener('dblclick', (e) => {
+      e.stopPropagation();
+      const newName = prompt('Rename tab:', t.name);
+      if (newName && newName.trim()) { t.name = newName.trim(); renderTabs(); toast(`Tab renamed to "${t.name}"`, 'info'); }
+    });
+    // Close tab
+    el.querySelector('.tab-close')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (confirm(`Close tab "${t.name}"?`)) closeTab(t.id);
+    });
     tl.appendChild(el);
   }
 }
@@ -299,8 +311,8 @@ function setupDrag(card: HTMLElement, placement: Placement): void {
   let dragging = false, startX = 0, startY = 0, origCol = 0, origRow = 0;
   let preview: HTMLDivElement | null = null;
 
-  header.addEventListener('mousedown', (e) => {
-    if ((e.target as HTMLElement).closest('.card-controls')) return; // Don't drag on buttons
+  function startDrag(e: MouseEvent): void {
+    if ((e.target as HTMLElement).closest('.card-controls')) return;
     if (!designMode) return;
     dragging = true; startX = e.clientX; startY = e.clientY;
     origCol = placement.col; origRow = placement.row;
@@ -309,45 +321,102 @@ function setupDrag(card: HTMLElement, placement: Placement): void {
     document.getElementById('card-container')!.appendChild(preview);
     updatePreview(placement);
     e.preventDefault();
-  });
+  }
 
-  document.addEventListener('mousemove', (e) => {
+  function onMove(e: MouseEvent): void {
     if (!dragging) return;
     const container = document.getElementById('card-container')!;
-    const cellW = container.clientWidth / GRID_COLS, cellH = container.clientHeight / GRID_ROWS;
+    const cellW = container.clientWidth / GRID_COLS;
+    const dashboard = document.getElementById('dashboard')!;
+    const cellH = dashboard.clientHeight / GRID_ROWS;
     const dx = e.clientX - startX, dy = e.clientY - startY;
     const dc = Math.round(dx / cellW), dr = Math.round(dy / cellH);
     placement.col = Math.max(0, Math.min(GRID_COLS - placement.col_span, origCol + dc));
-    placement.row = Math.max(0, Math.min(GRID_ROWS - placement.row_span, origRow + dr));
+    placement.row = Math.max(0, origRow + dr); // No upper limit on row — dashboard scrolls
     if (preview) updatePreview(placement);
     positionCard(card, placement);
-  });
+  }
 
-  document.addEventListener('mouseup', () => {
+  function dropCard(): void {
     if (!dragging) return;
     dragging = false; card.classList.remove('dragging');
     preview?.remove(); preview = null;
     window.api?.upsertPlacement(placement);
     updateInspector();
+    extendDashboard();
+  }
+
+  function cancelDrag(): void {
+    if (!dragging) return;
+    dragging = false; card.classList.remove('dragging');
+    preview?.remove(); preview = null;
+    placement.col = origCol; placement.row = origRow;
+    positionCard(card, placement);
+  }
+
+  header.addEventListener('mousedown', startDrag);
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', dropCard);
+
+  // Keyboard: Enter/Space = park, Escape = cancel
+  document.addEventListener('keydown', (e) => {
+    if (!dragging) return;
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); dropCard(); }
+    if (e.key === 'Escape') { cancelDrag(); }
   });
 
   function updatePreview(p: Placement): void {
     if (!preview) return;
     const container = document.getElementById('card-container')!;
-    const cw = container.clientWidth / GRID_COLS, ch = container.clientHeight / GRID_ROWS;
+    const cw = container.clientWidth / GRID_COLS;
+    const dashboard = document.getElementById('dashboard')!;
+    const ch = dashboard.clientHeight / GRID_ROWS;
     preview.style.cssText = `left:${p.col*cw}px;top:${p.row*ch}px;width:${p.col_span*cw-4}px;height:${p.row_span*ch-4}px;`;
   }
 }
 
 // ═══ CARD HELPERS ═══
 function positionCard(card: HTMLElement, p: Placement): void {
-  const c = document.getElementById('card-container')!;
-  const cw = c.clientWidth / GRID_COLS, ch = c.clientHeight / GRID_ROWS;
+  const container = document.getElementById('card-container')!;
+  const cw = container.clientWidth / GRID_COLS;
+  const dashboard = document.getElementById('dashboard')!;
+  const ch = dashboard.clientHeight / GRID_ROWS;
   card.style.left = `${p.col * cw}px`; card.style.top = `${p.row * ch}px`;
   card.style.width = `${p.col_span * cw - 4}px`; card.style.height = `${p.row_span * ch - 4}px`;
 }
 
-function repositionAllCards(): void { placements.forEach(p => { const c = document.getElementById(`card-${p.id}`); if (c) positionCard(c, p); }); }
+/** Extend card-container height if any cards go beyond the initial 8-row viewport */
+function extendDashboard(): void {
+  const dashboard = document.getElementById('dashboard')!;
+  const container = document.getElementById('card-container')!;
+  const overlay = document.getElementById('grid-overlay')!;
+  const baseH = dashboard.clientHeight;
+  let maxBottom = baseH;
+  const ch = baseH / GRID_ROWS;
+  for (const p of placements) {
+    const bottom = (p.row + p.row_span) * ch;
+    if (bottom > maxBottom) maxBottom = bottom;
+  }
+  const totalH = Math.max(baseH, maxBottom + 20);
+  container.style.minHeight = `${totalH}px`;
+  overlay.style.minHeight = `${totalH}px`;
+}
+
+// ═══ RECROP ALL ═══
+function recropAll(): void {
+  let count = 0;
+  document.querySelectorAll('.card').forEach(card => {
+    const compId = (card as HTMLElement).dataset.componentId;
+    const comp = components.find(c => c.id === compId);
+    if (comp?.type !== 'Crop') return;
+    const wv = card.querySelector('webview') as any;
+    if (!wv) return;
+    try { wv.send('agent-command', { cmd: 'reapplyCrop' }); count++; } catch {}
+  });
+  toast(`Recrop applied to ${count} card${count !== 1 ? 's' : ''}`, 'info');
+}
+
+function repositionAllCards(): void { placements.forEach(p => { const c = document.getElementById(`card-${p.id}`); if (c) positionCard(c, p); }); extendDashboard(); }
 
 function selectCard(pid: string): void {
   document.querySelectorAll('.card.selected').forEach(c => c.classList.remove('selected'));

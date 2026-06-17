@@ -35,12 +35,9 @@ function createWindow(): BrowserWindow {
     win.focus();
   });
 
-  // Prevent close — hide to tray instead
-  win.on('close', (e) => {
-    if (!isQuitting) {
-      e.preventDefault();
-      win.hide();
-    }
+  // Close = quit (no hide-to-tray in dev)
+  win.on('closed', () => {
+    mainWindow = null;
   });
 
   return win;
@@ -110,9 +107,7 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
+  app.quit();
 });
 
 app.on('will-quit', () => {
