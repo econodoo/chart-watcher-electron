@@ -1,6 +1,4 @@
 // ═══ Chart Watcher Shell ═══
-// Runs in the renderer process. Communicates with main via window.api (preload bridge).
-// Types defined in ../types.d.ts
 
 interface Source { id: string; name: string; entry_url: string; partition_key: string; auto_start: boolean; }
 interface Component { id: string; title: string; type: 'WholeSite' | 'Crop' | 'Clone'; source_id: string; selectors: string; }
@@ -11,873 +9,496 @@ interface Placement { id: string; tab_id: string; component_id: string; col: num
 let sources: Source[] = [];
 let components: Component[] = [];
 let tabs: Tab[] = [];
-let activeTabId: string = '';
+let activeTabId = '';
 let placements: Placement[] = [];
 let selectedCardId: string | null = null;
 let designMode = true;
-
-const GRID_COLS = 12;
-const GRID_ROWS = 8;
+const GRID_COLS = 12, GRID_ROWS = 8;
 const THEMES = ['colorful', 'stealth', 'colorblind'];
 let currentThemeIdx = 0;
+const ZOOM_LEVELS = [0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.25, 1.5];
+const cardZooms = new Map<string, number>();
+const sourceWebviews = new Map<string, any>();
+let cachedAgentCode: string | null = null;
 
-// ── DOM refs ──
-const $ = (sel: string) => document.querySelector(sel)!;
-const $$ = (sel: string) => document.querySelectorAll(sel);
+const $ = (s: string) => document.querySelector(s)!;
 
-// ── Init ──
+// ═══ INIT ═══
 document.addEventListener('DOMContentLoaded', () => {
-  console.log('[Shell] DOMContentLoaded fired');
-
-  // Wire buttons FIRST (no API needed)
+  // Wire toolbar
   $('#btn-add-source').addEventListener('click', showAddSourceDialog);
+  $('#btn-add-source-2').addEventListener('click', showAddSourceDialog);
   $('#btn-add-component').addEventListener('click', showAddComponentDialog);
   $('#btn-toggle-mode').addEventListener('click', toggleMode);
   $('#btn-toggle-left').addEventListener('click', () => $('#left-panel').classList.toggle('collapsed'));
   $('#btn-toggle-right').addEventListener('click', () => $('#right-panel').classList.toggle('collapsed'));
   $('#btn-add-tab').addEventListener('click', addTab);
   $('#btn-apply-layout').addEventListener('click', applyLayoutChanges);
-  $('#btn-delete-card').addEventListener('click', deleteSelectedCard);
+  $('#btn-delete-card').addEventListener('click', () => selectedCardId && removeCard(selectedCardId));
+  $('#btn-configure-card')?.addEventListener('click', () => {
+    if (!selectedCardId) return;
+    const p = placements.find(x => x.id === selectedCardId);
+    const c = p ? components.find(x => x.id === p.component_id) : null;
+    if (p && c) openConfigureWorkspace(p, c);
+  });
 
-  // Theme selector
   const themeSelect = $('#theme-select') as HTMLSelectElement;
   themeSelect.addEventListener('change', () => {
-    currentThemeIdx = THEMES.indexOf(themeSelect.value);
     applyTheme(themeSelect.value);
     window.api?.setSetting('theme', themeSelect.value);
   });
 
-  // Clock
-  setInterval(() => {
-    const el = document.getElementById('status-clock');
-    if (el) el.textContent = new Date().toLocaleTimeString();
-  }, 1000);
-
-  // Grid resize
-  window.addEventListener('resize', () => repositionAllCards());
-
-  console.log('[Shell] Buttons wired');
-
-  // NOW load data (async, with error handling)
+  setInterval(() => { const el = document.getElementById('status-clock'); if (el) el.textContent = new Date().toLocaleTimeString(); }, 1000);
+  window.addEventListener('resize', repositionAllCards);
   loadData(themeSelect);
 });
 
 async function loadData(themeSelect: HTMLSelectElement): Promise<void> {
-  // Check if preload bridge is available
-  if (!window.api) {
-    console.error('[Shell] window.api is undefined — preload failed to load!');
-    ($('#empty-state') as HTMLElement).innerHTML = `
-      <p style="color:var(--color-down)">⚠️ Preload bridge not available</p>
-      <p>Check DevTools console for errors.</p>
-      <p style="font-size:11px; margin-top:8px">Ctrl+Shift+I → Console</p>
-    `;
-    return;
-  }
-
+  if (!window.api) { toast('Preload bridge missing — check DevTools', 'error'); return; }
   try {
     sources = await window.api.getSources();
     components = await window.api.getComponents();
     tabs = await window.api.getTabs();
-    console.log(`[Shell] Loaded: ${sources.length} sources, ${components.length} components, ${tabs.length} tabs`);
-  } catch (err) {
-    console.error('[Shell] Failed to load data:', err);
-    ($('#empty-state') as HTMLElement).innerHTML = `
-      <p style="color:var(--color-down)">⚠️ Database error</p>
-      <p>${err}</p>
-    `;
-    return;
-  }
-
-  // Load saved theme
+  } catch (err) { toast(`DB error: ${err}`, 'error'); return; }
   try {
-    const savedTheme = await window.api.getSetting('theme');
-    if (savedTheme) {
-      currentThemeIdx = THEMES.indexOf(savedTheme);
-      if (currentThemeIdx < 0) currentThemeIdx = 0;
-      applyTheme(THEMES[currentThemeIdx]);
-      themeSelect.value = THEMES[currentThemeIdx];
-    }
-  } catch { /* ignore theme load error */ }
-
-  // Render UI
-  renderSources();
-  renderComponents();
-  renderTabs();
-
-  // Select first tab
-  if (tabs.length > 0) {
-    await selectTab(tabs[0].id);
-  }
-
-  // Main process events
-  if (window.api.onCycleTheme) {
-    window.api.onCycleTheme(() => {
-      currentThemeIdx = (currentThemeIdx + 1) % THEMES.length;
-      applyTheme(THEMES[currentThemeIdx]);
-      themeSelect.value = THEMES[currentThemeIdx];
-      window.api.setSetting('theme', THEMES[currentThemeIdx]);
-    });
-  }
-
-  if (window.api.onReloadSources) {
-    window.api.onReloadSources(() => reloadAllSources());
-  }
-
-  // Launch sources
-  for (const src of sources) {
-    if (src.auto_start) launchSource(src);
-  }
-
-  console.log('[Shell] Fully initialized');
+    const t = await window.api.getSetting('theme');
+    if (t && THEMES.includes(t)) { currentThemeIdx = THEMES.indexOf(t); applyTheme(t); themeSelect.value = t; }
+  } catch {}
+  renderSources(); renderComponents(); renderTabs();
+  if (tabs.length > 0) await selectTab(tabs[0].id);
+  window.api.onCycleTheme?.(() => { currentThemeIdx = (currentThemeIdx + 1) % THEMES.length; applyTheme(THEMES[currentThemeIdx]); themeSelect.value = THEMES[currentThemeIdx]; window.api.setSetting('theme', THEMES[currentThemeIdx]); });
+  window.api.onReloadSources?.(() => { sourceWebviews.forEach((wv, id) => { (wv as any).reload(); updateDot(id, 'loading'); }); toast('Reloading all sources…', 'info'); });
+  for (const s of sources) if (s.auto_start) launchSource(s);
+  toast(`Loaded ${sources.length} source${sources.length !== 1 ? 's' : ''}, ${components.length} component${components.length !== 1 ? 's' : ''}`, 'success');
 }
 
-// ═══ THEME ═══
+function applyTheme(name: string): void { (document.getElementById('theme-link') as HTMLLinkElement).href = `styles/${name}.css`; currentThemeIdx = THEMES.indexOf(name); }
 
-function applyTheme(name: string): void {
-  const link = $('#theme-link') as HTMLLinkElement;
-  link.href = `styles/${name}.css`;
+// ═══ TOAST ═══
+function toast(msg: string, type: 'success' | 'error' | 'info' = 'info'): void {
+  const c = document.getElementById('toast-container'); if (!c) return;
+  const t = document.createElement('div'); t.className = `toast ${type}`; t.textContent = msg;
+  c.appendChild(t); setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity 0.3s'; setTimeout(() => t.remove(), 300); }, 3000);
+  console.log(`[${type}] ${msg}`);
 }
 
 // ═══ SOURCES ═══
-
 function renderSources(): void {
-  const list = $('#source-list');
-  list.innerHTML = '';
-  for (const src of sources) {
-    const el = document.createElement('div');
-    el.className = 'source-item';
-    el.innerHTML = `
-      <span class="status-dot" data-source-id="${src.id}"></span>
-      <span class="source-name">${esc(src.name)}</span>
-    `;
+  const list = $('#source-list'); list.innerHTML = '';
+  for (const s of sources) {
+    const el = document.createElement('div'); el.className = 'source-item';
+    el.innerHTML = `<span class="status-dot" data-sid="${s.id}"></span><span class="source-name">${esc(s.name)}</span>
+      <span class="source-actions"><button title="Reload" data-act="reload">↻</button><button title="Remove" data-act="remove">×</button></span>`;
+    el.querySelector('[data-act="reload"]')!.addEventListener('click', (e) => { e.stopPropagation(); const wv = sourceWebviews.get(s.id); if (wv) { wv.reload(); updateDot(s.id, 'loading'); toast(`Reloading ${s.name}…`, 'info'); } });
+    el.querySelector('[data-act="remove"]')!.addEventListener('click', (e) => { e.stopPropagation(); if (confirm(`Remove source "${s.name}"?`)) removeSource(s.id); });
     list.appendChild(el);
   }
   renderStatusDots();
 }
 
 function renderStatusDots(): void {
-  const dotsContainer = $('#status-dots');
-  dotsContainer.innerHTML = '';
-  for (const src of sources) {
-    const dot = document.createElement('span');
-    dot.className = 'status-dot';
-    dot.dataset.sourceId = src.id;
-    dot.title = src.name;
-    dotsContainer.appendChild(dot);
-  }
+  const c = $('#status-dots'); c.innerHTML = '';
+  for (const s of sources) { const d = document.createElement('span'); d.className = 'status-dot'; d.dataset.sid = s.id; d.title = s.name; c.appendChild(d); }
 }
 
-function updateSourceStatus(sourceId: string, status: 'ready' | 'loading' | 'error' | 'stale'): void {
-  document.querySelectorAll(`.status-dot[data-source-id="${sourceId}"]`).forEach(dot => {
-    dot.className = `status-dot ${status}`;
-  });
+function updateDot(id: string, status: string): void {
+  document.querySelectorAll(`.status-dot[data-sid="${id}"]`).forEach(d => d.className = `status-dot ${status}`);
 }
 
-// ═══ WEBVIEW SOURCE MANAGEMENT ═══
+async function removeSource(id: string): Promise<void> {
+  const wv = sourceWebviews.get(id); if (wv) { wv.remove(); sourceWebviews.delete(id); }
+  sources = sources.filter(s => s.id !== id); renderSources();
+  toast('Source removed', 'info');
+}
 
-const sourceWebviews = new Map<string, HTMLElement>();
-let cachedAgentCode: string | null = null;
-
+// ═══ WEBVIEW SOURCES ═══
 function launchSource(src: Source): void {
   if (sourceWebviews.has(src.id)) return;
-
-  const host = document.getElementById('webview-host')!;
   const wv = document.createElement('webview') as any;
   wv.setAttribute('src', src.entry_url);
   wv.setAttribute('partition', src.partition_key || `persist:${src.id}`);
-  wv.setAttribute('preload', `file://${window.api.getWebviewPreloadPath()}`);
-  wv.setAttribute('webpreferences', 'contextIsolation=yes');
-  wv.style.width = '1px';
-  wv.style.height = '1px';
-
-  wv.addEventListener('dom-ready', () => {
-    updateSourceStatus(src.id, 'ready');
-    injectAgent(wv, src.name);
-    console.log(`[Source] ${src.name} loaded`);
-  });
-
-  wv.addEventListener('did-fail-load', () => {
-    updateSourceStatus(src.id, 'error');
-    console.error(`[Source] ${src.name} failed to load`);
-  });
-
-  // Listen for agent messages (via preload IPC bridge)
-  wv.addEventListener('ipc-message', (event: any) => {
-    if (event.channel === 'agent-message') {
-      handleAgentMessage(src.id, event.args[0]);
-    }
-  });
-
-  host.appendChild(wv);
-  sourceWebviews.set(src.id, wv);
-  updateSourceStatus(src.id, 'loading');
+  try { wv.setAttribute('preload', `file://${window.api.getWebviewPreloadPath()}`); } catch {}
+  wv.style.cssText = 'width:1px;height:1px;';
+  wv.addEventListener('dom-ready', () => { updateDot(src.id, 'ready'); injectAgent(wv, src.name); });
+  wv.addEventListener('did-fail-load', () => { updateDot(src.id, 'error'); toast(`${src.name} failed to load`, 'error'); });
+  wv.addEventListener('ipc-message', (ev: any) => { if (ev.channel === 'agent-message') handleAgentMsg(src.id, ev.args[0]); });
+  document.getElementById('webview-host')!.appendChild(wv);
+  sourceWebviews.set(src.id, wv); updateDot(src.id, 'loading');
 }
 
 async function injectAgent(wv: any, name: string): Promise<void> {
   try {
-    // Load agent code from compiled file (via Node.js fs through a trick:
-    // we use webview's executeJavaScript to inject the IIFE agent)
-    // The agent code is the compiled chartwatch-agent.js
-    if (!cachedAgentCode) {
-      // Fetch the agent JS via file:// URL
-      const agentPath = window.api.getAgentJsPath();
-      const resp = await fetch(`file://${agentPath}`);
-      cachedAgentCode = await resp.text();
-    }
+    if (!cachedAgentCode) { const r = await fetch(`file://${window.api.getAgentJsPath()}`); cachedAgentCode = await r.text(); }
     await wv.executeJavaScript(cachedAgentCode);
-    console.log(`[Agent] Injected into ${name}`);
-  } catch (err) {
-    console.error(`[Agent] Injection failed for ${name}:`, err);
+  } catch (err) { console.error(`[Agent] ${name}:`, err); }
+}
+
+// ═══ AGENT MESSAGES ═══
+function handleAgentMsg(srcId: string, msg: any): void {
+  if (msg.evt === 'ready') updateDot(srcId, 'ready');
+  else if (msg.evt === 'mutation') {
+    document.querySelectorAll(`.card[data-source-id="${srcId}"] .clone-content`).forEach(el => { el.textContent = msg.innerText || msg.html || ''; });
+    (document.getElementById('status-mutation') as HTMLElement).textContent = `⚡ ${new Date().toLocaleTimeString()}`;
   }
-}
-
-function sendToSource(sourceId: string, command: Record<string, any>): void {
-  const wv = sourceWebviews.get(sourceId) as any;
-  if (!wv) return;
-  wv.send('agent-command', command);
-}
-
-function reloadAllSources(): void {
-  for (const [id, wv] of sourceWebviews) {
-    (wv as any).reload();
-    updateSourceStatus(id, 'loading');
-  }
-}
-
-// ═══ AGENT MESSAGE ROUTING ═══
-
-function handleAgentMessage(sourceId: string, msg: any): void {
-  switch (msg.evt) {
-    case 'ready':
-      updateSourceStatus(sourceId, 'ready');
-      break;
-    case 'mutation':
-      routeMutation(sourceId, msg.stickerId, msg.html, msg.innerText);
-      break;
-    case 'stale':
-      updateSourceStatus(sourceId, 'stale');
-      break;
-    case 'picked':
-      handlePicked(sourceId, msg);
-      break;
-  }
-}
-
-function routeMutation(sourceId: string, stickerId: string, html: string, innerText: string): void {
-  // Find cards bound to this source and update
-  document.querySelectorAll(`.card[data-source-id="${sourceId}"]`).forEach(card => {
-    const body = card.querySelector('.clone-content');
-    if (body) {
-      body.textContent = innerText || html;
-    }
-    const dot = card.querySelector('.card-status');
-    if (dot) dot.className = 'card-status ready';
-  });
-
-  ($('#status-mutation') as HTMLElement).textContent = `Updated ${new Date().toLocaleTimeString()}`;
+  else if (msg.evt === 'stale') updateDot(srcId, 'stale');
 }
 
 // ═══ COMPONENTS ═══
-
 function renderComponents(): void {
-  const list = $('#component-list');
-  list.innerHTML = '';
-  for (const comp of components) {
-    const el = document.createElement('div');
-    el.className = 'component-item';
-    el.innerHTML = `
-      <span class="icon">${comp.type === 'WholeSite' ? '🌐' : comp.type === 'Crop' ? '✂️' : '📋'}</span>
-      <span class="component-name">${esc(comp.title)}</span>
-    `;
+  const list = $('#component-list'); list.innerHTML = '';
+  for (const c of components) {
+    const icons: Record<string, string> = { WholeSite: '🌐', Crop: '✂️', Clone: '📋' };
+    const el = document.createElement('div'); el.className = 'component-item';
+    el.innerHTML = `<span class="comp-icon">${icons[c.type] || '📦'}</span><span class="component-name">${esc(c.title)}</span>`;
     list.appendChild(el);
   }
 }
 
 // ═══ TABS ═══
-
 function renderTabs(): void {
-  const tabList = $('#tab-list');
-  tabList.innerHTML = '';
-  for (const tab of tabs) {
-    const el = document.createElement('div');
-    el.className = `tab ${tab.id === activeTabId ? 'active' : ''}`;
-    el.textContent = tab.name;
-    el.addEventListener('click', () => selectTab(tab.id));
-    tabList.appendChild(el);
+  const tl = $('#tab-list'); tl.innerHTML = '';
+  for (const t of tabs) {
+    const el = document.createElement('div'); el.className = `tab ${t.id === activeTabId ? 'active' : ''}`;
+    el.innerHTML = `<span>${esc(t.name)}</span>${tabs.length > 1 ? '<button class="tab-close" title="Close tab">×</button>' : ''}`;
+    el.querySelector('span')!.addEventListener('click', () => selectTab(t.id));
+    el.querySelector('.tab-close')?.addEventListener('click', (e) => { e.stopPropagation(); closeTab(t.id); });
+    tl.appendChild(el);
   }
 }
 
-async function selectTab(tabId: string): Promise<void> {
-  activeTabId = tabId;
-  placements = await window.api.getPlacements(tabId);
-  renderTabs();
-  renderCards();
+async function selectTab(id: string): Promise<void> {
+  activeTabId = id; placements = await window.api.getPlacements(id); renderTabs(); renderCards();
 }
 
 async function addTab(): Promise<void> {
-  const name = prompt('Tab name:', `Tab ${tabs.length + 1}`);
-  if (!name) return;
+  const name = prompt('Tab name:', `Tab ${tabs.length + 1}`); if (!name) return;
+  const t: Tab = { id: crypto.randomUUID(), workspace_id: tabs[0]?.workspace_id || '', name, sort_order: tabs.length, grid_cols: GRID_COLS, grid_rows: GRID_ROWS };
+  tabs.push(t); await selectTab(t.id); toast(`Tab "${name}" created`, 'success');
+}
 
-  const tab: Tab = {
-    id: crypto.randomUUID(),
-    workspace_id: tabs[0]?.workspace_id || '',
-    name,
-    sort_order: tabs.length,
-    grid_cols: GRID_COLS,
-    grid_rows: GRID_ROWS,
-  };
-
-  // Save tab (would need IPC handler — simplified)
-  tabs.push(tab);
-  await selectTab(tab.id);
+function closeTab(id: string): void {
+  if (tabs.length <= 1) return;
+  tabs = tabs.filter(t => t.id !== id); if (activeTabId === id) selectTab(tabs[0].id); else renderTabs();
 }
 
 // ═══ CARDS ═══
-
-const ZOOM_LEVELS = [0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.25, 1.5];
-const cardZooms = new Map<string, number>(); // placementId → zoom factor
-
 function renderCards(): void {
-  const container = $('#card-container');
-  container.innerHTML = '';
-
-  const emptyState = $('#empty-state') as HTMLElement;
-  emptyState.style.display = placements.length === 0 ? 'flex' : 'none';
-
+  const container = $('#card-container'); container.innerHTML = '';
+  (document.getElementById('empty-state') as HTMLElement).style.display = placements.length === 0 ? 'flex' : 'none';
   for (const p of placements) {
-    const comp = components.find(c => c.id === p.component_id);
-    if (!comp) continue;
-
-    const card = createCard(p, comp);
-    container.appendChild(card);
-    positionCard(card, p);
+    const comp = components.find(c => c.id === p.component_id); if (!comp) continue;
+    const card = buildCard(p, comp); container.appendChild(card); positionCard(card, p);
   }
 }
 
-function createCard(placement: Placement, comp: Component): HTMLDivElement {
-  const card = document.createElement('div');
-  card.className = 'card';
-  card.id = `card-${placement.id}`;
-  card.dataset.placementId = placement.id;
-  card.dataset.componentId = comp.id;
-  card.dataset.sourceId = comp.source_id;
-  card.dataset.type = comp.type;
-
-  const zoom = cardZooms.get(placement.id) ?? 1.0;
-  const zoomPct = Math.round(zoom * 100);
+function buildCard(p: Placement, comp: Component): HTMLDivElement {
+  const card = document.createElement('div'); card.className = 'card'; card.id = `card-${p.id}`;
+  card.dataset.placementId = p.id; card.dataset.componentId = comp.id; card.dataset.sourceId = comp.source_id;
+  const zoom = cardZooms.get(p.id) ?? (comp.type === 'WholeSite' ? 0.5 : 1.0);
+  cardZooms.set(p.id, zoom);
 
   card.innerHTML = `
-    <div class="card-header" title="Drag to move">
+    <div class="card-header">
       <span class="card-title">${esc(comp.title)}</span>
       <div class="card-controls">
-        <button class="card-btn" data-action="zoom-out" title="Zoom out">−</button>
-        <span class="card-zoom">${zoomPct}%</span>
-        <button class="card-btn" data-action="zoom-in" title="Zoom in">+</button>
-        <button class="card-btn" data-action="configure" title="Configure">⚙</button>
-        <button class="card-btn card-btn-close" data-action="remove" title="Remove">×</button>
+        <button class="card-btn" data-act="zoom-out" title="Zoom out">−</button>
+        <span class="card-zoom-label">${Math.round(zoom * 100)}%</span>
+        <button class="card-btn" data-act="zoom-in" title="Zoom in">+</button>
+        <button class="card-btn" data-act="configure" title="Configure">⚙</button>
+        <button class="card-btn card-btn-close" data-act="remove" title="Remove">×</button>
       </div>
     </div>
-    <div class="card-body"></div>
-  `;
+    <div class="card-body">
+      <div class="card-loading"><div class="spinner"></div><span>Loading…</span></div>
+    </div>`;
 
-  // Wire control buttons
-  card.querySelectorAll('.card-btn').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const action = (btn as HTMLElement).dataset.action;
-      switch (action) {
-        case 'zoom-in': changeZoom(placement.id, 1); break;
-        case 'zoom-out': changeZoom(placement.id, -1); break;
-        case 'configure': openConfigureWorkspace(placement, comp); break;
-        case 'remove': removeCard(placement.id); break;
-      }
-    });
-  });
+  // Wire buttons
+  card.querySelectorAll('.card-btn').forEach(btn => btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const act = (btn as HTMLElement).dataset.act;
+    if (act === 'zoom-in') changeZoom(p.id, 1);
+    else if (act === 'zoom-out') changeZoom(p.id, -1);
+    else if (act === 'configure') openConfigureWorkspace(p, comp);
+    else if (act === 'remove') removeCard(p.id);
+  }));
 
-  card.addEventListener('click', () => selectCard(placement.id));
+  card.addEventListener('click', () => selectCard(p.id));
 
-  // Create webview for WholeSite and Crop modes
+  // Drag to reposition
+  setupDrag(card, p);
+
+  // Embed content
   if (comp.type === 'WholeSite' || comp.type === 'Crop') {
     embedWebview(card, comp, zoom);
   } else {
-    // Clone: show placeholder until mutations arrive
-    card.querySelector('.card-body')!.innerHTML =
-      '<div class="clone-content">Listening for live data…</div>';
+    card.querySelector('.card-body')!.innerHTML = '<div class="clone-content">Listening for live data…</div>';
+    // Send observe commands for Clone
+    setTimeout(() => sendCloneObserve(comp), 1000);
   }
-
   return card;
 }
 
-function embedWebview(card: HTMLDivElement, comp: Component, zoom: number): void {
-  const src = sources.find(s => s.id === comp.source_id);
-  if (!src) return;
-
+function embedWebview(card: HTMLElement, comp: Component, zoom: number): void {
+  const src = sources.find(s => s.id === comp.source_id); if (!src) return;
   const body = card.querySelector('.card-body')!;
-  body.innerHTML = '';
-
   const wv = document.createElement('webview') as any;
   wv.setAttribute('src', src.entry_url);
   wv.setAttribute('partition', src.partition_key || `persist:${src.id}`);
-  wv.setAttribute('preload', `file://${window.api.getWebviewPreloadPath()}`);
-  wv.classList.add('card-webview');
-
+  try { wv.setAttribute('preload', `file://${window.api.getWebviewPreloadPath()}`); } catch {}
+  wv.style.cssText = 'width:100%;height:100%;';
   wv.addEventListener('dom-ready', () => {
-    // Apply zoom
+    body.querySelector('.card-loading')?.remove();
     wv.setZoomFactor(zoom);
-
-    // Apply crop CSS if Crop mode with saved selectors
-    if (comp.type === 'Crop') {
-      const selectors = JSON.parse(comp.selectors || '[]');
-      if (selectors.length > 0) {
-        applyCropToWebview(wv, selectors);
-      }
-    }
-
-    // Mark ready
-    const dot = card.querySelector('.card-status');
-    if (dot) dot.className = 'card-status ready';
-    console.log(`[Card] ${comp.title} webview ready (zoom: ${Math.round(zoom * 100)}%)`);
+    if (comp.type === 'Crop') applyCropCss(wv, comp);
   });
-
   body.appendChild(wv);
 }
 
-async function applyCropToWebview(wv: any, selectors: any[]): Promise<void> {
-  // Build CSS selector from the first cascade
-  if (selectors.length === 0) return;
-  const cascade = selectors[0];
-  let cssSelector = '';
-  for (const step of cascade) {
-    if (step.strategy === 'css' && step.expression) {
-      cssSelector = step.expression;
-      break;
-    }
-    if (step.strategy === 'id' && step.expression) {
-      cssSelector = '#' + step.expression;
-      break;
-    }
-  }
-  if (!cssSelector) return;
+async function applyCropCss(wv: any, comp: Component): Promise<void> {
+  const sels = JSON.parse(comp.selectors || '[]'); if (sels.length === 0) return;
+  const cascade = sels[0]; let css = '';
+  for (const s of cascade) { if (s.strategy === 'css') { css = s.expression; break; } if (s.strategy === 'id') { css = '#' + s.expression; break; } }
+  if (!css) return;
+  try { await wv.executeJavaScript(`(function(){var t=document.querySelector('${css.replace(/'/g,"\\'")}');if(!t)return;var s=document.createElement('style');s.textContent='body>*:not(style){visibility:hidden!important;height:0!important;overflow:hidden!important}body{margin:0!important;padding:0!important}';document.head.appendChild(s);var e=t;while(e&&e!==document.documentElement){e.style.setProperty('visibility','visible','important');e.style.setProperty('height','auto','important');e.style.setProperty('overflow','visible','important');e=e.parentElement;}t.scrollIntoView({block:'start'});})();`); } catch {}
+}
 
-  const cropJs = `
-    (function() {
-      const target = document.querySelector('${cssSelector.replace(/'/g, "\\'")}');
-      if (!target) return;
-      // Scroll to element and hide everything else
-      const style = document.createElement('style');
-      style.textContent = \`
-        body > *:not(#__cw_crop_keep__) { visibility: hidden !important; height: 0 !important; overflow: hidden !important; }
-        body { margin: 0 !important; padding: 0 !important; }
-      \`;
-      document.head.appendChild(style);
-      // Show target and ancestors
-      let el = target;
-      while (el && el !== document.documentElement) {
-        el.style.setProperty('visibility', 'visible', 'important');
-        el.style.setProperty('height', 'auto', 'important');
-        el.style.setProperty('overflow', 'visible', 'important');
-        el = el.parentElement;
-      }
-      target.scrollIntoView({ block: 'start' });
-    })();
-  `;
-  try {
-    await wv.executeJavaScript(cropJs);
-    console.log(`[Crop] Applied crop selector: ${cssSelector}`);
-  } catch (err) {
-    console.error('[Crop] Failed to apply:', err);
+function sendCloneObserve(comp: Component): void {
+  const wv = sourceWebviews.get(comp.source_id); if (!wv) return;
+  const sels = JSON.parse(comp.selectors || '[]');
+  for (let i = 0; i < sels.length; i++) {
+    try { wv.send('agent-command', { cmd: 'observe', stickerId: `${comp.id}:${i}`, cascade: sels[i] }); } catch {}
   }
 }
 
 // ═══ ZOOM ═══
-
-function changeZoom(placementId: string, direction: number): void {
-  const current = cardZooms.get(placementId) ?? 1.0;
-  const idx = ZOOM_LEVELS.findIndex(z => z >= current);
-  const newIdx = Math.max(0, Math.min(ZOOM_LEVELS.length - 1, idx + direction));
-  const newZoom = ZOOM_LEVELS[newIdx];
-  cardZooms.set(placementId, newZoom);
-
-  // Apply to webview
-  const card = document.getElementById(`card-${placementId}`);
-  if (!card) return;
-
-  const wv = card.querySelector('webview') as any;
-  if (wv?.setZoomFactor) {
-    wv.setZoomFactor(newZoom);
-  }
-
-  // Update label
-  const label = card.querySelector('.card-zoom');
-  if (label) label.textContent = `${Math.round(newZoom * 100)}%`;
-
-  console.log(`[Zoom] ${placementId}: ${Math.round(newZoom * 100)}%`);
+function changeZoom(pid: string, dir: number): void {
+  const cur = cardZooms.get(pid) ?? 1; const idx = ZOOM_LEVELS.findIndex(z => z >= cur);
+  const ni = Math.max(0, Math.min(ZOOM_LEVELS.length - 1, (idx < 0 ? 5 : idx) + dir));
+  const nz = ZOOM_LEVELS[ni]; cardZooms.set(pid, nz);
+  const card = document.getElementById(`card-${pid}`); if (!card) return;
+  const wv = card.querySelector('webview') as any; if (wv?.setZoomFactor) wv.setZoomFactor(nz);
+  const lbl = card.querySelector('.card-zoom-label'); if (lbl) lbl.textContent = `${Math.round(nz * 100)}%`;
 }
 
-// ═══ REMOVE CARD ═══
+// ═══ DRAG TO REPOSITION ═══
+function setupDrag(card: HTMLElement, placement: Placement): void {
+  const header = card.querySelector('.card-header') as HTMLElement; if (!header) return;
+  let dragging = false, startX = 0, startY = 0, origCol = 0, origRow = 0;
+  let preview: HTMLDivElement | null = null;
 
-async function removeCard(placementId: string): Promise<void> {
-  if (!confirm('Remove this component from the dashboard?')) return;
-  try {
-    await window.api.deletePlacement(placementId);
-    placements = placements.filter(p => p.id !== placementId);
-    if (selectedCardId === placementId) selectedCardId = null;
-    renderCards();
-    console.log(`[Card] Removed placement ${placementId}`);
-  } catch (err) {
-    console.error('[Card] Remove failed:', err);
+  header.addEventListener('mousedown', (e) => {
+    if ((e.target as HTMLElement).closest('.card-controls')) return; // Don't drag on buttons
+    if (!designMode) return;
+    dragging = true; startX = e.clientX; startY = e.clientY;
+    origCol = placement.col; origRow = placement.row;
+    card.classList.add('dragging');
+    preview = document.createElement('div'); preview.className = 'drop-preview';
+    document.getElementById('card-container')!.appendChild(preview);
+    updatePreview(placement);
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const container = document.getElementById('card-container')!;
+    const cellW = container.clientWidth / GRID_COLS, cellH = container.clientHeight / GRID_ROWS;
+    const dx = e.clientX - startX, dy = e.clientY - startY;
+    const dc = Math.round(dx / cellW), dr = Math.round(dy / cellH);
+    placement.col = Math.max(0, Math.min(GRID_COLS - placement.col_span, origCol + dc));
+    placement.row = Math.max(0, Math.min(GRID_ROWS - placement.row_span, origRow + dr));
+    if (preview) updatePreview(placement);
+    positionCard(card, placement);
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false; card.classList.remove('dragging');
+    preview?.remove(); preview = null;
+    window.api?.upsertPlacement(placement);
+    updateInspector();
+  });
+
+  function updatePreview(p: Placement): void {
+    if (!preview) return;
+    const container = document.getElementById('card-container')!;
+    const cw = container.clientWidth / GRID_COLS, ch = container.clientHeight / GRID_ROWS;
+    preview.style.cssText = `left:${p.col*cw}px;top:${p.row*ch}px;width:${p.col_span*cw-4}px;height:${p.row_span*ch-4}px;`;
   }
+}
+
+// ═══ CARD HELPERS ═══
+function positionCard(card: HTMLElement, p: Placement): void {
+  const c = document.getElementById('card-container')!;
+  const cw = c.clientWidth / GRID_COLS, ch = c.clientHeight / GRID_ROWS;
+  card.style.left = `${p.col * cw}px`; card.style.top = `${p.row * ch}px`;
+  card.style.width = `${p.col_span * cw - 4}px`; card.style.height = `${p.row_span * ch - 4}px`;
+}
+
+function repositionAllCards(): void { placements.forEach(p => { const c = document.getElementById(`card-${p.id}`); if (c) positionCard(c, p); }); }
+
+function selectCard(pid: string): void {
+  document.querySelectorAll('.card.selected').forEach(c => c.classList.remove('selected'));
+  selectedCardId = pid;
+  document.getElementById(`card-${pid}`)?.classList.add('selected');
+  updateInspector();
+}
+
+function updateInspector(): void {
+  const sec = document.getElementById('inspector-layout-section') as HTMLElement;
+  if (!selectedCardId) { sec.style.display = 'none'; (document.getElementById('inspector-hint') as HTMLElement).textContent = 'Click a card to inspect'; return; }
+  const p = placements.find(x => x.id === selectedCardId); if (!p) return;
+  const comp = components.find(c => c.id === p.component_id);
+  const src = sources.find(s => s.id === comp?.source_id);
+  sec.style.display = '';
+  (document.getElementById('inspector-hint') as HTMLElement).innerHTML = `
+    <p style="font-weight:600;color:var(--fg-primary);margin-bottom:4px">${esc(comp?.title || '—')}</p>
+    <p class="inspector-detail"><b>Type:</b> ${comp?.type}</p>
+    <p class="inspector-detail"><b>Source:</b> ${esc(src?.name || '—')}</p>
+    <p class="inspector-detail"><b>Zoom:</b> ${Math.round((cardZooms.get(p.id) ?? 1) * 100)}%</p>`;
+  (document.getElementById('inp-col') as HTMLInputElement).value = String(p.col);
+  (document.getElementById('inp-row') as HTMLInputElement).value = String(p.row);
+  (document.getElementById('inp-colspan') as HTMLInputElement).value = String(p.col_span);
+  (document.getElementById('inp-rowspan') as HTMLInputElement).value = String(p.row_span);
+}
+
+async function applyLayoutChanges(): Promise<void> {
+  if (!selectedCardId) return; const p = placements.find(x => x.id === selectedCardId); if (!p) return;
+  p.col = +((document.getElementById('inp-col') as HTMLInputElement).value) || 0;
+  p.row = +((document.getElementById('inp-row') as HTMLInputElement).value) || 0;
+  p.col_span = +((document.getElementById('inp-colspan') as HTMLInputElement).value) || 3;
+  p.row_span = +((document.getElementById('inp-rowspan') as HTMLInputElement).value) || 2;
+  await window.api.upsertPlacement(p);
+  const card = document.getElementById(`card-${p.id}`); if (card) positionCard(card, p);
+  toast('Layout updated', 'success');
+}
+
+async function removeCard(pid: string): Promise<void> {
+  await window.api.deletePlacement(pid);
+  placements = placements.filter(p => p.id !== pid);
+  if (selectedCardId === pid) { selectedCardId = null; updateInspector(); }
+  renderCards(); toast('Component removed', 'info');
+}
+
+function toggleMode(): void {
+  designMode = !designMode; document.body.classList.toggle('view-mode', !designMode);
+  (document.getElementById('mode-label') as HTMLElement).textContent = designMode ? 'Design' : 'View';
+  (document.getElementById('mode-icon') as HTMLElement).textContent = designMode ? '✏️' : '👁️';
+  (document.getElementById('status-mode') as HTMLElement).textContent = designMode ? 'Design' : 'View';
+  toast(designMode ? 'Design mode — drag cards, see grid' : 'View mode — clean wallboard', 'info');
 }
 
 // ═══ CONFIGURE WORKSPACE ═══
-
-function openConfigureWorkspace(placement: Placement, comp: Component): void {
-  console.log(`[Configure] Opening workspace for: ${comp.title}`);
-  const src = sources.find(s => s.id === comp.source_id);
-  if (!src) return;
-
-  const overlay = document.createElement('div');
-  overlay.className = 'workspace-overlay';
+function openConfigureWorkspace(p: Placement, comp: Component): void {
+  const src = sources.find(s => s.id === comp.source_id); if (!src) return;
+  const overlay = document.createElement('div'); overlay.className = 'workspace-overlay';
   overlay.innerHTML = `
     <div class="workspace-toolbar">
-      <span class="workspace-title">Configure: ${esc(comp.title)}</span>
+      <span class="workspace-title">⚙ ${esc(comp.title)} — ${esc(src.name)}</span>
       <div class="workspace-controls">
-        ${comp.type === 'Crop' ? '<button id="ws-pick-element" class="btn-primary">🎯 Pick Element</button>' : ''}
+        ${comp.type === 'Crop' ? '<button id="ws-pick" class="btn-primary">🎯 Pick Element to Crop</button>' : ''}
         <button id="ws-reload" class="btn-cancel">↻ Reload</button>
-        <button id="ws-done" class="btn-primary">Done</button>
+        <button id="ws-done" class="btn-primary">✓ Done</button>
       </div>
     </div>
     <div class="workspace-body"></div>
-    <div class="workspace-status">
-      <span id="ws-status-text">Loading ${esc(src.name)}…</span>
-    </div>
-  `;
-
+    <div class="workspace-status"><span id="ws-status">Loading ${esc(src.name)}…</span></div>`;
   document.body.appendChild(overlay);
 
-  const wsBody = overlay.querySelector('.workspace-body')!;
   const wv = document.createElement('webview') as any;
-  wv.setAttribute('src', src.entry_url);
-  wv.setAttribute('partition', src.partition_key || `persist:${src.id}`);
-  wv.setAttribute('preload', `file://${window.api.getWebviewPreloadPath()}`);
-  wv.classList.add('workspace-webview');
+  wv.setAttribute('src', src.entry_url); wv.setAttribute('partition', src.partition_key || `persist:${src.id}`);
+  try { wv.setAttribute('preload', `file://${window.api.getWebviewPreloadPath()}`); } catch {}
+  wv.style.cssText = 'width:100%;height:100%;';
+  wv.addEventListener('dom-ready', async () => { const s = document.getElementById('ws-status'); if (s) s.textContent = `${src.name} — Ready`; await injectAgent(wv, src.name); });
+  overlay.querySelector('.workspace-body')!.appendChild(wv);
 
-  wv.addEventListener('dom-ready', async () => {
-    const statusEl = document.getElementById('ws-status-text');
-    if (statusEl) statusEl.textContent = `${src.name} — Ready`;
+  overlay.querySelector('#ws-done')!.addEventListener('click', () => { overlay.remove(); renderCards(); });
+  overlay.querySelector('#ws-reload')?.addEventListener('click', () => { wv.reload(); const s = document.getElementById('ws-status'); if (s) s.textContent = 'Reloading…'; });
 
-    // Inject agent for Crop picker
-    if (comp.type === 'Crop') {
-      await injectAgent(wv, src.name + ' (configure)');
-    }
-  });
-
-  wsBody.appendChild(wv);
-
-  // Done button
-  overlay.querySelector('#ws-done')!.addEventListener('click', () => {
-    overlay.remove();
-    // Re-render cards to apply any changes
-    renderCards();
-  });
-
-  // Reload button
-  overlay.querySelector('#ws-reload')?.addEventListener('click', () => {
-    wv.reload();
-    const statusEl = document.getElementById('ws-status-text');
-    if (statusEl) statusEl.textContent = `Reloading ${src.name}…`;
-  });
-
-  // Pick element button (Crop only)
-  const pickBtn = overlay.querySelector('#ws-pick-element');
+  // Crop picker
+  const pickBtn = overlay.querySelector('#ws-pick');
   if (pickBtn) {
     pickBtn.addEventListener('click', () => {
-      const statusEl = document.getElementById('ws-status-text');
-      if (statusEl) statusEl.textContent = 'Click an element on the page to crop to it. Press ESC to cancel.';
-      (pickBtn as HTMLButtonElement).disabled = true;
-      (pickBtn as HTMLButtonElement).textContent = '🎯 Picking…';
-
-      // Enter picker mode
+      const s = document.getElementById('ws-status'); if (s) s.textContent = '🎯 Click any element on the page to select it for cropping. ESC to cancel.';
+      (pickBtn as HTMLButtonElement).disabled = true; (pickBtn as HTMLButtonElement).textContent = '🎯 Picking…';
       wv.send('agent-command', { cmd: 'enterPick' });
-
-      // Listen for pick result
-      const onPick = (event: any) => {
-        if (event.channel === 'agent-message' && event.args[0]?.evt === 'picked') {
-          wv.removeEventListener('ipc-message', onPick);
-          const msg = event.args[0];
-          handleCropPick(comp, msg.cascade, statusEl);
-          (pickBtn as HTMLButtonElement).disabled = false;
-          (pickBtn as HTMLButtonElement).textContent = '🎯 Pick Element';
-          // Exit picker
+      const handler = (ev: any) => {
+        if (ev.channel !== 'agent-message') return;
+        const msg = ev.args[0];
+        if (msg.evt === 'picked') {
+          wv.removeEventListener('ipc-message', handler);
+          comp.selectors = JSON.stringify([msg.cascade]);
+          window.api.upsertComponent(comp);
           wv.send('agent-command', { cmd: 'exitPick' });
-          // Apply crop preview
-          const selectors = JSON.parse(comp.selectors || '[]');
-          applyCropToWebview(wv, selectors);
-        }
-        if (event.channel === 'agent-message' && event.args[0]?.evt === 'pickCancelled') {
-          wv.removeEventListener('ipc-message', onPick);
-          (pickBtn as HTMLButtonElement).disabled = false;
-          (pickBtn as HTMLButtonElement).textContent = '🎯 Pick Element';
-          if (statusEl) statusEl.textContent = 'Pick cancelled.';
+          (pickBtn as HTMLButtonElement).disabled = false; (pickBtn as HTMLButtonElement).textContent = '🎯 Pick Element to Crop';
+          const css = msg.cascade?.find((s: any) => s.strategy === 'css')?.expression || 'element';
+          if (s) s.textContent = `✓ Cropped to: ${css}`;
+          applyCropCss(wv, comp);
+          toast(`Crop selector saved: ${css}`, 'success');
+        } else if (msg.evt === 'pickCancelled') {
+          wv.removeEventListener('ipc-message', handler);
+          (pickBtn as HTMLButtonElement).disabled = false; (pickBtn as HTMLButtonElement).textContent = '🎯 Pick Element to Crop';
+          if (s) s.textContent = 'Pick cancelled.';
         }
       };
-      wv.addEventListener('ipc-message', onPick);
+      wv.addEventListener('ipc-message', handler);
     });
   }
 }
 
-function handleCropPick(comp: Component, cascade: any[], statusEl: HTMLElement | null): void {
-  // Save the picked cascade to the component
-  comp.selectors = JSON.stringify([cascade]);
-  window.api.upsertComponent(comp);
-  if (statusEl) {
-    const cssExpr = cascade.find((s: any) => s.strategy === 'css')?.expression || 'element';
-    statusEl.textContent = `Cropped to: ${cssExpr}`;
-  }
-  console.log(`[Crop] Saved selector cascade for ${comp.title}:`, cascade);
-}
-
-function positionCard(card: HTMLElement, p: Placement): void {
-  const container = $('#card-container') as HTMLElement;
-  const W = container.clientWidth;
-  const H = container.clientHeight;
-  const cellW = W / GRID_COLS;
-  const cellH = H / GRID_ROWS;
-
-  card.style.left = `${p.col * cellW}px`;
-  card.style.top = `${p.row * cellH}px`;
-  card.style.width = `${p.col_span * cellW - 4}px`;
-  card.style.height = `${p.row_span * cellH - 4}px`;
-}
-
-function repositionAllCards(): void {
-  for (const p of placements) {
-    const card = document.getElementById(`card-${p.id}`);
-    if (card) positionCard(card, p);
-  }
-}
-
-function selectCard(placementId: string): void {
-  // Deselect previous
-  $$('.card.selected').forEach(c => c.classList.remove('selected'));
-
-  selectedCardId = placementId;
-  const card = document.getElementById(`card-${placementId}`);
-  card?.classList.add('selected');
-
-  // Update inspector
-  const p = placements.find(pl => pl.id === placementId);
-  if (p) {
-    (document.getElementById('inp-row') as HTMLInputElement).value = String(p.row);
-    (document.getElementById('inp-col') as HTMLInputElement).value = String(p.col);
-    (document.getElementById('inp-rowspan') as HTMLInputElement).value = String(p.row_span);
-    (document.getElementById('inp-colspan') as HTMLInputElement).value = String(p.col_span);
-
-    const comp = components.find(c => c.id === p.component_id);
-    ($('#inspector-content') as HTMLElement).innerHTML = `
-      <p><strong>${esc(comp?.title || '—')}</strong></p>
-      <p class="dim">${comp?.type || '—'} · Source: ${sources.find(s => s.id === comp?.source_id)?.name || '—'}</p>
-    `;
-  }
-}
-
-async function applyLayoutChanges(): Promise<void> {
-  if (!selectedCardId) return;
-  const p = placements.find(pl => pl.id === selectedCardId);
-  if (!p) return;
-
-  p.row = parseInt((document.getElementById('inp-row') as HTMLInputElement).value) || 0;
-  p.col = parseInt((document.getElementById('inp-col') as HTMLInputElement).value) || 0;
-  p.row_span = parseInt((document.getElementById('inp-rowspan') as HTMLInputElement).value) || 2;
-  p.col_span = parseInt((document.getElementById('inp-colspan') as HTMLInputElement).value) || 3;
-
-  await window.api.upsertPlacement(p);
-
-  const card = document.getElementById(`card-${p.id}`);
-  if (card) positionCard(card, p);
-}
-
-async function deleteSelectedCard(): Promise<void> {
-  if (!selectedCardId) return;
-  await removeCard(selectedCardId);
-}
-
-// ═══ MODE ═══
-
-function toggleMode(): void {
-  designMode = !designMode;
-  document.body.classList.toggle('view-mode', !designMode);
-  ($('#mode-label') as HTMLElement).textContent = designMode ? 'Design' : 'View';
-  ($('#mode-icon') as HTMLElement).textContent = designMode ? '✏️' : '👁️';
-  ($('#status-mode') as HTMLElement).textContent = designMode ? 'Design' : 'View';
-}
-
 // ═══ DIALOGS ═══
-
 function showAddSourceDialog(): void {
-  console.log('[Dialog] Opening Add Source');
-  const overlay = document.createElement('div');
-  overlay.className = 'dialog-overlay';
-  overlay.innerHTML = `
-    <div class="dialog">
-      <h2>Add Source</h2>
-      <label>Name</label>
-      <input id="dlg-source-name" placeholder="e.g., SSI iBoard" />
-      <label>URL</label>
-      <input id="dlg-source-url" placeholder="https://iboard.ssi.com.vn/" />
-      <div class="dialog-actions">
-        <button class="btn-cancel" id="dlg-cancel">Cancel</button>
-        <button class="btn-primary" id="dlg-ok">Add Source</button>
-      </div>
-    </div>
-  `;
+  const overlay = document.createElement('div'); overlay.className = 'dialog-overlay';
+  overlay.innerHTML = `<div class="dialog"><h2>Add Source</h2>
+    <label>Name</label><input id="d-name" placeholder="e.g. SSI iBoard" autofocus />
+    <label>URL</label><input id="d-url" placeholder="https://iboard.ssi.com.vn/" />
+    <div class="dialog-actions"><button class="btn-cancel" id="d-no">Cancel</button><button class="btn-primary" id="d-yes">Add</button></div></div>`;
   document.body.appendChild(overlay);
-
-  // Close on overlay background click
-  overlay.addEventListener('click', (e) => {
-    if (e.target === overlay) overlay.remove();
-  });
-
-  overlay.querySelector('#dlg-cancel')!.addEventListener('click', () => overlay.remove());
-  overlay.querySelector('#dlg-ok')!.addEventListener('click', async () => {
-    const name = (document.getElementById('dlg-source-name') as HTMLInputElement).value.trim();
-    const url = (document.getElementById('dlg-source-url') as HTMLInputElement).value.trim();
-    if (!name || !url) { alert('Name and URL are required.'); return; }
-
-    const src: Source = {
-      id: crypto.randomUUID(),
-      name,
-      entry_url: url,
-      partition_key: `persist:${name.toLowerCase().replace(/\s+/g, '-')}`,
-      auto_start: true,
-    };
-
-    try {
-      await window.api.upsertSource(src);
-      sources.push(src);
-      renderSources();
-      launchSource(src);
-      console.log(`[Source] Added: ${name} → ${url}`);
-    } catch (err) {
-      console.error('[Source] Save failed:', err);
-      alert(`Failed to save source: ${err}`);
-    }
-    overlay.remove();
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  overlay.querySelector('#d-no')!.addEventListener('click', () => overlay.remove());
+  overlay.querySelector('#d-yes')!.addEventListener('click', async () => {
+    const name = (document.getElementById('d-name') as HTMLInputElement).value.trim();
+    const url = (document.getElementById('d-url') as HTMLInputElement).value.trim();
+    if (!name || !url) { toast('Name and URL required', 'error'); return; }
+    const s: Source = { id: crypto.randomUUID(), name, entry_url: url, partition_key: `persist:${name.toLowerCase().replace(/\s+/g,'-')}`, auto_start: true };
+    await window.api.upsertSource(s); sources.push(s); renderSources(); launchSource(s);
+    toast(`Source "${name}" added`, 'success'); overlay.remove();
   });
 }
 
 function showAddComponentDialog(): void {
-  console.log('[Dialog] Opening Add Component');
-  if (sources.length === 0) {
-    alert('Add a source first before creating components.');
-    return;
-  }
-
-  const sourceOptions = sources.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
-
-  const overlay = document.createElement('div');
-  overlay.className = 'dialog-overlay';
-  overlay.innerHTML = `
-    <div class="dialog">
-      <h2>Add Component</h2>
-      <label>Source</label>
-      <select id="dlg-comp-source">${sourceOptions}</select>
-      <label>Title</label>
-      <input id="dlg-comp-title" placeholder="e.g., SSI Full Board" />
-      <label>Render Mode</label>
-      <select id="dlg-comp-mode">
-        <option value="WholeSite">WholeSite (full page in card)</option>
-        <option value="Crop">Crop (isolate one element)</option>
-        <option value="Clone">Clone (mirror live data)</option>
-      </select>
-      <div class="dialog-actions">
-        <button class="btn-cancel" id="dlg-cancel">Cancel</button>
-        <button class="btn-primary" id="dlg-ok">Create</button>
-      </div>
-    </div>
-  `;
+  if (!sources.length) { toast('Add a source first', 'error'); return; }
+  const opts = sources.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
+  const overlay = document.createElement('div'); overlay.className = 'dialog-overlay';
+  overlay.innerHTML = `<div class="dialog"><h2>Add Component</h2>
+    <label>Source</label><select id="d-src">${opts}</select>
+    <label>Title</label><input id="d-title" placeholder="Auto from source name" />
+    <label>Render Mode</label><select id="d-mode">
+      <option value="WholeSite">🌐 WholeSite — full page in card</option>
+      <option value="Crop">✂️ Crop — pick one element to show</option>
+      <option value="Clone">📋 Clone — mirror live text data</option></select>
+    <div class="dialog-actions"><button class="btn-cancel" id="d-no">Cancel</button><button class="btn-primary" id="d-yes">Create</button></div></div>`;
   document.body.appendChild(overlay);
-
-  overlay.addEventListener('click', (e) => {
-    if (e.target === overlay) overlay.remove();
-  });
-
-  overlay.querySelector('#dlg-cancel')!.addEventListener('click', () => overlay.remove());
-  overlay.querySelector('#dlg-ok')!.addEventListener('click', async () => {
-    const sourceId = (document.getElementById('dlg-comp-source') as HTMLSelectElement).value;
-    const title = (document.getElementById('dlg-comp-title') as HTMLInputElement).value.trim()
-      || sources.find(s => s.id === sourceId)?.name || 'Component';
-    const type = (document.getElementById('dlg-comp-mode') as HTMLSelectElement).value as Component['type'];
-
-    const comp: Component = {
-      id: crypto.randomUUID(),
-      title,
-      type,
-      source_id: sourceId,
-      selectors: '[]',
-    };
-
-    try {
-      await window.api.upsertComponent(comp);
-      components.push(comp);
-      renderComponents();
-      console.log(`[Component] Created: ${title} (${type})`);
-
-      // Auto-place on current tab
-      if (activeTabId) {
-        const placement: Placement = {
-          id: crypto.randomUUID(),
-          tab_id: activeTabId,
-          component_id: comp.id,
-          col: findNextFreeCol(),
-          row: 0,
-          col_span: type === 'WholeSite' ? 6 : 3,
-          row_span: type === 'WholeSite' ? 4 : 2,
-        };
-
-        await window.api.upsertPlacement(placement);
-        placements.push(placement);
-        renderCards();
-        console.log(`[Placement] Placed at col=${placement.col}, row=${placement.row}`);
-      }
-    } catch (err) {
-      console.error('[Component] Save failed:', err);
-      alert(`Failed to save component: ${err}`);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  overlay.querySelector('#d-no')!.addEventListener('click', () => overlay.remove());
+  overlay.querySelector('#d-yes')!.addEventListener('click', async () => {
+    const srcId = (document.getElementById('d-src') as HTMLSelectElement).value;
+    const title = (document.getElementById('d-title') as HTMLInputElement).value.trim() || sources.find(s => s.id === srcId)?.name || 'Component';
+    const type = (document.getElementById('d-mode') as HTMLSelectElement).value as Component['type'];
+    const comp: Component = { id: crypto.randomUUID(), title, type, source_id: srcId, selectors: '[]' };
+    await window.api.upsertComponent(comp); components.push(comp); renderComponents();
+    if (activeTabId) {
+      const p: Placement = { id: crypto.randomUUID(), tab_id: activeTabId, component_id: comp.id, col: findFreeCol(), row: 0, col_span: type === 'WholeSite' ? 6 : 4, row_span: type === 'WholeSite' ? 4 : 3 };
+      await window.api.upsertPlacement(p); placements.push(p); renderCards();
     }
-    overlay.remove();
+    toast(`"${title}" created (${type})`, 'success'); overlay.remove();
+    // Auto-open configure for Crop
+    if (type === 'Crop' && activeTabId) {
+      const lastP = placements[placements.length - 1];
+      if (lastP) openConfigureWorkspace(lastP, comp);
+    }
   });
-}
-
-// ═══ PICKER ═══
-
-let pickerResolve: ((cascade: any[] | null) => void) | null = null;
-
-function handlePicked(sourceId: string, msg: any): void {
-  if (pickerResolve) {
-    pickerResolve(msg.cascade);
-    pickerResolve = null;
-  }
 }
 
 // ═══ HELPERS ═══
-
-function esc(text: string): string {
-  const el = document.createElement('span');
-  el.textContent = text;
-  return el.innerHTML;
-}
-
-function findNextFreeCol(): number {
-  // Find the rightmost occupied column, place new card after it
-  let maxRight = 0;
-  for (const p of placements) {
-    const right = p.col + p.col_span;
-    if (right > maxRight) maxRight = right;
-  }
-  // Wrap to next row if no room
-  return maxRight >= GRID_COLS ? 0 : maxRight;
-}
-
-function uuid(): string {
-  return crypto.randomUUID();
-}
+function esc(t: string): string { const e = document.createElement('span'); e.textContent = t; return e.innerHTML; }
+function findFreeCol(): number { let max = 0; placements.forEach(p => { const r = p.col + p.col_span; if (r > max) max = r; }); return max >= GRID_COLS ? 0 : max; }

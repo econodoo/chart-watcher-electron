@@ -13,100 +13,106 @@
 
 <!-- ═══ TOOLBAR ═══ -->
 <header id="toolbar">
-  <div class="toolbar-left">
-    <button id="btn-add-source" title="Add Source">
-      <span class="icon">🌐</span> Source
+  <div class="toolbar-group">
+    <button id="btn-add-source" title="Add a market dashboard source">
+      <span class="ico">＋</span> Source
     </button>
-    <button id="btn-add-component" title="Add Component">
-      <span class="icon">📦</span> Component
+    <button id="btn-add-component" title="Add component to dashboard">
+      <span class="ico">＋</span> Component
     </button>
-    <div class="toolbar-sep"></div>
-    <button id="btn-toggle-mode" title="Toggle Design/View mode">
+    <span class="sep"></span>
+    <button id="btn-toggle-mode" title="Toggle Design / View mode">
       <span id="mode-icon">✏️</span> <span id="mode-label">Design</span>
     </button>
   </div>
-
-  <div class="toolbar-center">
-    <span class="app-title">Chart Watcher</span>
-  </div>
-
-  <div class="toolbar-right">
-    <select id="theme-select" title="Theme">
+  <div class="toolbar-group">
+    <select id="theme-select" title="Switch theme">
       <option value="colorful">🎨 Colorful</option>
       <option value="stealth">🌙 Stealth</option>
-      <option value="colorblind">♿ ColorBlind</option>
+      <option value="colorblind">♿ Accessible</option>
     </select>
-    <button id="btn-toggle-left" title="Toggle Explorer">☰</button>
-    <button id="btn-toggle-right" title="Toggle Inspector">⚙️</button>
+    <span class="sep"></span>
+    <button id="btn-toggle-left" title="Toggle source panel">◧</button>
+    <button id="btn-toggle-right" title="Toggle inspector">◨</button>
   </div>
 </header>
 
-<!-- ═══ MAIN CONTENT ═══ -->
+<!-- ═══ MAIN ═══ -->
 <div id="main">
-
-  <!-- LEFT PANEL: Explorer -->
+  <!-- LEFT PANEL -->
   <aside id="left-panel">
-    <div class="panel-section">
-      <h3>Sources</h3>
+    <section class="panel-section">
+      <div class="section-header">
+        <h3>Sources</h3>
+        <button class="section-btn" id="btn-add-source-2" title="Add source">+</button>
+      </div>
       <div id="source-list" class="item-list"></div>
-    </div>
-    <div class="panel-section">
-      <h3>Components</h3>
+    </section>
+    <section class="panel-section">
+      <div class="section-header">
+        <h3>Library</h3>
+      </div>
       <div id="component-list" class="item-list"></div>
-    </div>
+    </section>
   </aside>
 
-  <!-- CENTER: Dashboard -->
+  <!-- CENTER -->
   <main id="center">
-    <!-- Tab bar -->
     <div id="tab-bar">
       <div id="tab-list"></div>
-      <button id="btn-add-tab" title="Add Tab">+</button>
+      <button id="btn-add-tab" title="New tab">＋</button>
     </div>
-
-    <!-- Grid canvas -->
     <div id="dashboard">
       <div id="grid-overlay"></div>
       <div id="card-container"></div>
       <div id="empty-state">
-        <p>No components placed yet.</p>
-        <p>Click <strong>Component</strong> to add one.</p>
+        <div class="empty-icon">📊</div>
+        <p>Dashboard is empty</p>
+        <p class="dim">Click <b>＋ Component</b> to add a market view</p>
       </div>
     </div>
   </main>
 
-  <!-- RIGHT PANEL: Inspector -->
+  <!-- RIGHT PANEL -->
   <aside id="right-panel">
-    <div class="panel-section">
-      <h3>Inspector</h3>
-      <div id="inspector-content">
-        <p class="dim">Select a component to inspect.</p>
+    <section class="panel-section">
+      <div class="section-header"><h3>Inspector</h3></div>
+      <div id="inspector-identity">
+        <p class="dim" id="inspector-hint">Click a card to inspect</p>
       </div>
-    </div>
-    <div class="panel-section">
-      <h3>Layout</h3>
-      <div class="inspector-grid">
-        <label>Row</label>  <input type="number" id="inp-row" min="0" max="7" value="0" />
-        <label>Col</label>  <input type="number" id="inp-col" min="0" max="11" value="0" />
-        <label>RowSpan</label> <input type="number" id="inp-rowspan" min="1" max="8" value="2" />
-        <label>ColSpan</label> <input type="number" id="inp-colspan" min="1" max="12" value="3" />
+    </section>
+    <section class="panel-section" id="inspector-layout-section" style="display:none">
+      <div class="section-header"><h3>Grid Position</h3></div>
+      <div class="form-grid">
+        <label>Col</label>   <input type="number" id="inp-col" min="0" max="11" />
+        <label>Row</label>   <input type="number" id="inp-row" min="0" max="7" />
+        <label>Width</label>  <input type="number" id="inp-colspan" min="1" max="12" />
+        <label>Height</label> <input type="number" id="inp-rowspan" min="1" max="8" />
       </div>
-      <button id="btn-apply-layout" class="btn-small">Apply</button>
-      <button id="btn-delete-card" class="btn-small btn-danger">Delete</button>
-    </div>
+      <div class="form-actions">
+        <button id="btn-apply-layout" class="btn-sm btn-accent">Apply</button>
+        <button id="btn-configure-card" class="btn-sm">⚙ Configure</button>
+        <button id="btn-delete-card" class="btn-sm btn-danger">× Remove</button>
+      </div>
+    </section>
   </aside>
 </div>
 
 <!-- ═══ STATUS BAR ═══ -->
 <footer id="status-bar">
   <div id="status-dots"></div>
-  <span id="status-clock"></span>
+  <span class="status-sep">│</span>
   <span id="status-mutation">—</span>
+  <span class="flex-spacer"></span>
+  <span id="status-clock"></span>
   <span id="status-mode" class="badge">Design</span>
 </footer>
 
-<!-- ═══ HIDDEN WEBVIEW HOST ═══ -->
-<div id="webview-host" style="position:absolute; width:1px; height:1px; overflow:hidden; left:-9999px;"></div>
+<!-- TOAST CONTAINER -->
+<div id="toast-container"></div>
+
+<!-- HIDDEN WEBVIEW HOST -->
+<div id="webview-host" style="position:fixed;width:1px;height:1px;overflow:hidden;left:-9999px;top:-9999px;"></div>
 
 <script src="../../dist/renderer/shell.js"></script>
 </body>
