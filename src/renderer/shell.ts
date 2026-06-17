@@ -52,6 +52,27 @@ document.addEventListener('DOMContentLoaded', () => {
 
   setInterval(() => { const el = document.getElementById('status-clock'); if (el) el.textContent = new Date().toLocaleTimeString(); }, 1000);
   window.addEventListener('resize', repositionAllCards);
+
+  // Dashboard drop target for library items
+  const dashboard = document.getElementById('dashboard')!;
+  dashboard.addEventListener('dragover', (e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'; });
+  dashboard.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const compId = e.dataTransfer?.getData('text/plain');
+    if (!compId) return;
+    const comp = components.find(c => c.id === compId);
+    if (comp) {
+      // Calculate drop grid position from mouse
+      const container = document.getElementById('card-container')!;
+      const rect = container.getBoundingClientRect();
+      const cellW = container.clientWidth / GRID_COLS;
+      const cellH = dashboard.clientHeight / GRID_ROWS;
+      const col = Math.floor((e.clientX - rect.left) / cellW);
+      const row = Math.floor((e.clientY - rect.top) / cellH);
+      placeComponentAtPosition(comp, col, row);
+    }
+  });
+
   loadData(themeSelect);
 });
 
@@ -151,9 +172,62 @@ function renderComponents(): void {
   for (const c of components) {
     const icons: Record<string, string> = { WholeSite: '🌐', Crop: '✂️', Clone: '📋' };
     const el = document.createElement('div'); el.className = 'component-item';
+    el.setAttribute('draggable', 'true');
     el.innerHTML = `<span class="comp-icon">${icons[c.type] || '📦'}</span><span class="component-name">${esc(c.title)}</span>`;
+
+    // Click = place on current tab
+    el.addEventListener('click', () => placeComponentOnTab(c));
+
+    // Drag start = store component id for drop
+    el.addEventListener('dragstart', (e) => {
+      e.dataTransfer?.setData('text/plain', c.id);
+      el.style.opacity = '0.5';
+    });
+    el.addEventListener('dragend', () => { el.style.opacity = '1'; });
+
     list.appendChild(el);
   }
+}
+
+async function placeComponentOnTab(comp: Component): Promise<void> {
+  if (!activeTabId) { toast('Select a tab first', 'error'); return; }
+  if (placements.some(p => p.component_id === comp.id)) {
+    toast(`"${comp.title}" is already on this tab`, 'info');
+    return;
+  }
+  const colSpan = comp.type === 'WholeSite' ? 6 : 4;
+  const rowSpan = comp.type === 'WholeSite' ? 4 : 3;
+  const pos = findFreePosition(colSpan, rowSpan);
+  const p: Placement = {
+    id: crypto.randomUUID(), tab_id: activeTabId, component_id: comp.id,
+    col: pos.col, row: pos.row, col_span: colSpan, row_span: rowSpan
+  };
+  await window.api.upsertPlacement(p);
+  placements.push(p);
+  renderCards();
+  extendDashboard();
+  toast(`"${comp.title}" placed at (${pos.col}, ${pos.row})`, 'success');
+}
+
+async function placeComponentAtPosition(comp: Component, col: number, row: number): Promise<void> {
+  if (!activeTabId) return;
+  if (placements.some(p => p.component_id === comp.id)) {
+    toast(`"${comp.title}" is already on this tab`, 'info');
+    return;
+  }
+  const colSpan = comp.type === 'WholeSite' ? 6 : 4;
+  const rowSpan = comp.type === 'WholeSite' ? 4 : 3;
+  const p: Placement = {
+    id: crypto.randomUUID(), tab_id: activeTabId, component_id: comp.id,
+    col: Math.max(0, Math.min(GRID_COLS - colSpan, col)), row: Math.max(0, row),
+    col_span: colSpan, row_span: rowSpan
+  };
+  snapToFree(p); // ensure no overlap
+  await window.api.upsertPlacement(p);
+  placements.push(p);
+  renderCards();
+  extendDashboard();
+  toast(`"${comp.title}" dropped at (${p.col}, ${p.row})`, 'success');
 }
 
 // ═══ TABS ═══
@@ -353,6 +427,9 @@ function setupDrag(card: HTMLElement, placement: Placement): void {
     if (!dragging) return;
     dragging = false; card.classList.remove('dragging');
     preview?.remove(); preview = null;
+    // Snap to nearest free space if overlapping
+    snapToFree(placement);
+    positionCard(card, placement);
     window.api?.upsertPlacement(placement);
     updateInspector();
     extendDashboard();
@@ -688,7 +765,10 @@ function showAddComponentDialog(): void {
     const comp: Component = { id: crypto.randomUUID(), title, type, source_id: srcId, selectors: '[]' };
     await window.api.upsertComponent(comp); components.push(comp); renderComponents();
     if (activeTabId) {
-      const p: Placement = { id: crypto.randomUUID(), tab_id: activeTabId, component_id: comp.id, col: findFreeCol(), row: 0, col_span: type === 'WholeSite' ? 6 : 4, row_span: type === 'WholeSite' ? 4 : 3 };
+      const colSpan = type === 'WholeSite' ? 6 : 4;
+      const rowSpan = type === 'WholeSite' ? 4 : 3;
+      const pos = findFreePosition(colSpan, rowSpan);
+      const p: Placement = { id: crypto.randomUUID(), tab_id: activeTabId, component_id: comp.id, col: pos.col, row: pos.row, col_span: colSpan, row_span: rowSpan };
       await window.api.upsertPlacement(p); placements.push(p); renderCards();
     }
     toast(`"${title}" created (${type})`, 'success'); overlay.remove();
@@ -701,5 +781,66 @@ function showAddComponentDialog(): void {
 }
 
 // ═══ HELPERS ═══
+// ═══ GRID OCCUPANCY ═══
+function buildOccupancyGrid(excludeId?: string): boolean[][] {
+  // Find max row needed
+  let maxRow = GRID_ROWS;
+  for (const p of placements) {
+    if (p.id === excludeId) continue;
+    const bottom = p.row + p.row_span;
+    if (bottom > maxRow) maxRow = bottom;
+  }
+  maxRow += 4; // extra room
+
+  const grid: boolean[][] = [];
+  for (let r = 0; r < maxRow; r++) { grid[r] = []; for (let c = 0; c < GRID_COLS; c++) grid[r][c] = false; }
+
+  for (const p of placements) {
+    if (p.id === excludeId) continue;
+    for (let r = p.row; r < p.row + p.row_span && r < maxRow; r++)
+      for (let c = p.col; c < p.col + p.col_span && c < GRID_COLS; c++)
+        grid[r][c] = true;
+  }
+  return grid;
+}
+
+function canPlace(grid: boolean[][], col: number, row: number, colSpan: number, rowSpan: number): boolean {
+  if (col < 0 || col + colSpan > GRID_COLS) return false;
+  if (row < 0) return false;
+  for (let r = row; r < row + rowSpan; r++) {
+    if (r >= grid.length) return true; // below grid = always free
+    for (let c = col; c < col + colSpan; c++)
+      if (grid[r][c]) return false;
+  }
+  return true;
+}
+
+function findFreePosition(colSpan: number, rowSpan: number, excludeId?: string): { col: number; row: number } {
+  const grid = buildOccupancyGrid(excludeId);
+  const maxRow = grid.length + 4;
+  for (let r = 0; r < maxRow; r++)
+    for (let c = 0; c <= GRID_COLS - colSpan; c++)
+      if (canPlace(grid, c, r, colSpan, rowSpan)) return { col: c, row: r };
+  return { col: 0, row: maxRow };
+}
+
+function snapToFree(p: Placement): void {
+  const grid = buildOccupancyGrid(p.id);
+  if (canPlace(grid, p.col, p.row, p.col_span, p.row_span)) return; // already free
+  // Search nearby positions, expanding outward
+  for (let dist = 1; dist < 20; dist++) {
+    for (let dr = -dist; dr <= dist; dr++) {
+      for (let dc = -dist; dc <= dist; dc++) {
+        if (Math.abs(dr) !== dist && Math.abs(dc) !== dist) continue; // only perimeter
+        const nr = p.row + dr, nc = p.col + dc;
+        if (nc < 0 || nc + p.col_span > GRID_COLS || nr < 0) continue;
+        if (canPlace(grid, nc, nr, p.col_span, p.row_span)) { p.col = nc; p.row = nr; return; }
+      }
+    }
+  }
+  // Fallback: place below everything
+  const pos = findFreePosition(p.col_span, p.row_span, p.id);
+  p.col = pos.col; p.row = pos.row;
+}
+
 function esc(t: string): string { const e = document.createElement('span'); e.textContent = t; return e.innerHTML; }
-function findFreeCol(): number { let max = 0; placements.forEach(p => { const r = p.col + p.col_span; if (r > max) max = r; }); return max >= GRID_COLS ? 0 : max; }
