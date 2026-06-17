@@ -334,6 +334,9 @@ async function addTab(): Promise<void> {
 
 // ═══ CARDS ═══
 
+const ZOOM_LEVELS = [0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.25, 1.5];
+const cardZooms = new Map<string, number>(); // placementId → zoom factor
+
 function renderCards(): void {
   const container = $('#card-container');
   container.innerHTML = '';
@@ -358,51 +361,280 @@ function createCard(placement: Placement, comp: Component): HTMLDivElement {
   card.dataset.placementId = placement.id;
   card.dataset.componentId = comp.id;
   card.dataset.sourceId = comp.source_id;
+  card.dataset.type = comp.type;
+
+  const zoom = cardZooms.get(placement.id) ?? 1.0;
+  const zoomPct = Math.round(zoom * 100);
 
   card.innerHTML = `
-    <div class="card-header">
+    <div class="card-header" title="Drag to move">
       <span class="card-title">${esc(comp.title)}</span>
-      <span class="card-status"></span>
+      <div class="card-controls">
+        <button class="card-btn" data-action="zoom-out" title="Zoom out">−</button>
+        <span class="card-zoom">${zoomPct}%</span>
+        <button class="card-btn" data-action="zoom-in" title="Zoom in">+</button>
+        <button class="card-btn" data-action="configure" title="Configure">⚙</button>
+        <button class="card-btn card-btn-close" data-action="remove" title="Remove">×</button>
+      </div>
     </div>
-    <div class="card-body">
-      ${getCardContent(comp)}
-    </div>
+    <div class="card-body"></div>
   `;
+
+  // Wire control buttons
+  card.querySelectorAll('.card-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const action = (btn as HTMLElement).dataset.action;
+      switch (action) {
+        case 'zoom-in': changeZoom(placement.id, 1); break;
+        case 'zoom-out': changeZoom(placement.id, -1); break;
+        case 'configure': openConfigureWorkspace(placement, comp); break;
+        case 'remove': removeCard(placement.id); break;
+      }
+    });
+  });
 
   card.addEventListener('click', () => selectCard(placement.id));
 
-  // WholeSite: create webview inside card
-  if (comp.type === 'WholeSite') {
-    const src = sources.find(s => s.id === comp.source_id);
-    if (src) {
-      const body = card.querySelector('.card-body')!;
-      body.innerHTML = '';
-      const wv = document.createElement('webview') as any;
-      wv.setAttribute('src', src.entry_url);
-      wv.setAttribute('partition', src.partition_key || `persist:${src.id}`);
-      wv.setAttribute('preload', `file://${window.api.getWebviewPreloadPath()}`);
-      wv.style.width = '100%';
-      wv.style.height = '100%';
-      wv.addEventListener('dom-ready', () => {
-        const dot = card.querySelector('.card-status');
-        if (dot) dot.className = 'card-status ready';
-      });
-      body.appendChild(wv);
-    }
+  // Create webview for WholeSite and Crop modes
+  if (comp.type === 'WholeSite' || comp.type === 'Crop') {
+    embedWebview(card, comp, zoom);
+  } else {
+    // Clone: show placeholder until mutations arrive
+    card.querySelector('.card-body')!.innerHTML =
+      '<div class="clone-content">Listening for live data…</div>';
   }
 
   return card;
 }
 
-function getCardContent(comp: Component): string {
-  switch (comp.type) {
-    case 'Clone':
-      return '<div class="clone-content">Waiting for data...</div>';
-    case 'Crop':
-      return '<div class="placeholder">Crop view</div>';
-    default:
-      return '<div class="placeholder">Loading...</div>';
+function embedWebview(card: HTMLDivElement, comp: Component, zoom: number): void {
+  const src = sources.find(s => s.id === comp.source_id);
+  if (!src) return;
+
+  const body = card.querySelector('.card-body')!;
+  body.innerHTML = '';
+
+  const wv = document.createElement('webview') as any;
+  wv.setAttribute('src', src.entry_url);
+  wv.setAttribute('partition', src.partition_key || `persist:${src.id}`);
+  wv.setAttribute('preload', `file://${window.api.getWebviewPreloadPath()}`);
+  wv.classList.add('card-webview');
+
+  wv.addEventListener('dom-ready', () => {
+    // Apply zoom
+    wv.setZoomFactor(zoom);
+
+    // Apply crop CSS if Crop mode with saved selectors
+    if (comp.type === 'Crop') {
+      const selectors = JSON.parse(comp.selectors || '[]');
+      if (selectors.length > 0) {
+        applyCropToWebview(wv, selectors);
+      }
+    }
+
+    // Mark ready
+    const dot = card.querySelector('.card-status');
+    if (dot) dot.className = 'card-status ready';
+    console.log(`[Card] ${comp.title} webview ready (zoom: ${Math.round(zoom * 100)}%)`);
+  });
+
+  body.appendChild(wv);
+}
+
+async function applyCropToWebview(wv: any, selectors: any[]): Promise<void> {
+  // Build CSS selector from the first cascade
+  if (selectors.length === 0) return;
+  const cascade = selectors[0];
+  let cssSelector = '';
+  for (const step of cascade) {
+    if (step.strategy === 'css' && step.expression) {
+      cssSelector = step.expression;
+      break;
+    }
+    if (step.strategy === 'id' && step.expression) {
+      cssSelector = '#' + step.expression;
+      break;
+    }
   }
+  if (!cssSelector) return;
+
+  const cropJs = `
+    (function() {
+      const target = document.querySelector('${cssSelector.replace(/'/g, "\\'")}');
+      if (!target) return;
+      // Scroll to element and hide everything else
+      const style = document.createElement('style');
+      style.textContent = \`
+        body > *:not(#__cw_crop_keep__) { visibility: hidden !important; height: 0 !important; overflow: hidden !important; }
+        body { margin: 0 !important; padding: 0 !important; }
+      \`;
+      document.head.appendChild(style);
+      // Show target and ancestors
+      let el = target;
+      while (el && el !== document.documentElement) {
+        el.style.setProperty('visibility', 'visible', 'important');
+        el.style.setProperty('height', 'auto', 'important');
+        el.style.setProperty('overflow', 'visible', 'important');
+        el = el.parentElement;
+      }
+      target.scrollIntoView({ block: 'start' });
+    })();
+  `;
+  try {
+    await wv.executeJavaScript(cropJs);
+    console.log(`[Crop] Applied crop selector: ${cssSelector}`);
+  } catch (err) {
+    console.error('[Crop] Failed to apply:', err);
+  }
+}
+
+// ═══ ZOOM ═══
+
+function changeZoom(placementId: string, direction: number): void {
+  const current = cardZooms.get(placementId) ?? 1.0;
+  const idx = ZOOM_LEVELS.findIndex(z => z >= current);
+  const newIdx = Math.max(0, Math.min(ZOOM_LEVELS.length - 1, idx + direction));
+  const newZoom = ZOOM_LEVELS[newIdx];
+  cardZooms.set(placementId, newZoom);
+
+  // Apply to webview
+  const card = document.getElementById(`card-${placementId}`);
+  if (!card) return;
+
+  const wv = card.querySelector('webview') as any;
+  if (wv?.setZoomFactor) {
+    wv.setZoomFactor(newZoom);
+  }
+
+  // Update label
+  const label = card.querySelector('.card-zoom');
+  if (label) label.textContent = `${Math.round(newZoom * 100)}%`;
+
+  console.log(`[Zoom] ${placementId}: ${Math.round(newZoom * 100)}%`);
+}
+
+// ═══ REMOVE CARD ═══
+
+async function removeCard(placementId: string): Promise<void> {
+  if (!confirm('Remove this component from the dashboard?')) return;
+  try {
+    await window.api.deletePlacement(placementId);
+    placements = placements.filter(p => p.id !== placementId);
+    if (selectedCardId === placementId) selectedCardId = null;
+    renderCards();
+    console.log(`[Card] Removed placement ${placementId}`);
+  } catch (err) {
+    console.error('[Card] Remove failed:', err);
+  }
+}
+
+// ═══ CONFIGURE WORKSPACE ═══
+
+function openConfigureWorkspace(placement: Placement, comp: Component): void {
+  console.log(`[Configure] Opening workspace for: ${comp.title}`);
+  const src = sources.find(s => s.id === comp.source_id);
+  if (!src) return;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'workspace-overlay';
+  overlay.innerHTML = `
+    <div class="workspace-toolbar">
+      <span class="workspace-title">Configure: ${esc(comp.title)}</span>
+      <div class="workspace-controls">
+        ${comp.type === 'Crop' ? '<button id="ws-pick-element" class="btn-primary">🎯 Pick Element</button>' : ''}
+        <button id="ws-reload" class="btn-cancel">↻ Reload</button>
+        <button id="ws-done" class="btn-primary">Done</button>
+      </div>
+    </div>
+    <div class="workspace-body"></div>
+    <div class="workspace-status">
+      <span id="ws-status-text">Loading ${esc(src.name)}…</span>
+    </div>
+  `;
+
+  document.body.appendChild(overlay);
+
+  const wsBody = overlay.querySelector('.workspace-body')!;
+  const wv = document.createElement('webview') as any;
+  wv.setAttribute('src', src.entry_url);
+  wv.setAttribute('partition', src.partition_key || `persist:${src.id}`);
+  wv.setAttribute('preload', `file://${window.api.getWebviewPreloadPath()}`);
+  wv.classList.add('workspace-webview');
+
+  wv.addEventListener('dom-ready', async () => {
+    const statusEl = document.getElementById('ws-status-text');
+    if (statusEl) statusEl.textContent = `${src.name} — Ready`;
+
+    // Inject agent for Crop picker
+    if (comp.type === 'Crop') {
+      await injectAgent(wv, src.name + ' (configure)');
+    }
+  });
+
+  wsBody.appendChild(wv);
+
+  // Done button
+  overlay.querySelector('#ws-done')!.addEventListener('click', () => {
+    overlay.remove();
+    // Re-render cards to apply any changes
+    renderCards();
+  });
+
+  // Reload button
+  overlay.querySelector('#ws-reload')?.addEventListener('click', () => {
+    wv.reload();
+    const statusEl = document.getElementById('ws-status-text');
+    if (statusEl) statusEl.textContent = `Reloading ${src.name}…`;
+  });
+
+  // Pick element button (Crop only)
+  const pickBtn = overlay.querySelector('#ws-pick-element');
+  if (pickBtn) {
+    pickBtn.addEventListener('click', () => {
+      const statusEl = document.getElementById('ws-status-text');
+      if (statusEl) statusEl.textContent = 'Click an element on the page to crop to it. Press ESC to cancel.';
+      (pickBtn as HTMLButtonElement).disabled = true;
+      (pickBtn as HTMLButtonElement).textContent = '🎯 Picking…';
+
+      // Enter picker mode
+      wv.send('agent-command', { cmd: 'enterPick' });
+
+      // Listen for pick result
+      const onPick = (event: any) => {
+        if (event.channel === 'agent-message' && event.args[0]?.evt === 'picked') {
+          wv.removeEventListener('ipc-message', onPick);
+          const msg = event.args[0];
+          handleCropPick(comp, msg.cascade, statusEl);
+          (pickBtn as HTMLButtonElement).disabled = false;
+          (pickBtn as HTMLButtonElement).textContent = '🎯 Pick Element';
+          // Exit picker
+          wv.send('agent-command', { cmd: 'exitPick' });
+          // Apply crop preview
+          const selectors = JSON.parse(comp.selectors || '[]');
+          applyCropToWebview(wv, selectors);
+        }
+        if (event.channel === 'agent-message' && event.args[0]?.evt === 'pickCancelled') {
+          wv.removeEventListener('ipc-message', onPick);
+          (pickBtn as HTMLButtonElement).disabled = false;
+          (pickBtn as HTMLButtonElement).textContent = '🎯 Pick Element';
+          if (statusEl) statusEl.textContent = 'Pick cancelled.';
+        }
+      };
+      wv.addEventListener('ipc-message', onPick);
+    });
+  }
+}
+
+function handleCropPick(comp: Component, cascade: any[], statusEl: HTMLElement | null): void {
+  // Save the picked cascade to the component
+  comp.selectors = JSON.stringify([cascade]);
+  window.api.upsertComponent(comp);
+  if (statusEl) {
+    const cssExpr = cascade.find((s: any) => s.strategy === 'css')?.expression || 'element';
+    statusEl.textContent = `Cropped to: ${cssExpr}`;
+  }
+  console.log(`[Crop] Saved selector cascade for ${comp.title}:`, cascade);
 }
 
 function positionCard(card: HTMLElement, p: Placement): void {
@@ -467,12 +699,7 @@ async function applyLayoutChanges(): Promise<void> {
 
 async function deleteSelectedCard(): Promise<void> {
   if (!selectedCardId) return;
-  if (!confirm('Delete this component placement?')) return;
-
-  await window.api.deletePlacement(selectedCardId);
-  placements = placements.filter(p => p.id !== selectedCardId);
-  selectedCardId = null;
-  renderCards();
+  await removeCard(selectedCardId);
 }
 
 // ═══ MODE ═══
