@@ -20,7 +20,8 @@ function createWindow(): BrowserWindow {
       preload: path.join(__dirname, '../preload/shell-preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      webviewTag: true,           // Enable <webview> for source embedding
+      sandbox: false,              // Required: preload uses require('electron')
+      webviewTag: true,
       spellcheck: false,
     },
   });

@@ -26,31 +26,10 @@ const $ = (sel: string) => document.querySelector(sel)!;
 const $$ = (sel: string) => document.querySelectorAll(sel);
 
 // ── Init ──
-document.addEventListener('DOMContentLoaded', async () => {
-  // Load data
-  sources = await window.api.getSources();
-  components = await window.api.getComponents();
-  tabs = await window.api.getTabs();
+document.addEventListener('DOMContentLoaded', () => {
+  console.log('[Shell] DOMContentLoaded fired');
 
-  // Load saved theme
-  const savedTheme = await window.api.getSetting('theme');
-  if (savedTheme) {
-    currentThemeIdx = THEMES.indexOf(savedTheme);
-    if (currentThemeIdx < 0) currentThemeIdx = 0;
-    applyTheme(THEMES[currentThemeIdx]);
-  }
-
-  // Render UI
-  renderSources();
-  renderComponents();
-  renderTabs();
-
-  // Select first tab
-  if (tabs.length > 0) {
-    await selectTab(tabs[0].id);
-  }
-
-  // Wire toolbar
+  // Wire buttons FIRST (no API needed)
   $('#btn-add-source').addEventListener('click', showAddSourceDialog);
   $('#btn-add-component').addEventListener('click', showAddComponentDialog);
   $('#btn-toggle-mode').addEventListener('click', toggleMode);
@@ -62,38 +41,95 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Theme selector
   const themeSelect = $('#theme-select') as HTMLSelectElement;
-  themeSelect.value = THEMES[currentThemeIdx];
   themeSelect.addEventListener('change', () => {
     currentThemeIdx = THEMES.indexOf(themeSelect.value);
     applyTheme(themeSelect.value);
-    window.api.setSetting('theme', themeSelect.value);
+    window.api?.setSetting('theme', themeSelect.value);
   });
-
-  // Main process events
-  window.api.onCycleTheme(() => {
-    currentThemeIdx = (currentThemeIdx + 1) % THEMES.length;
-    applyTheme(THEMES[currentThemeIdx]);
-    themeSelect.value = THEMES[currentThemeIdx];
-    window.api.setSetting('theme', THEMES[currentThemeIdx]);
-  });
-
-  window.api.onReloadSources(() => reloadAllSources());
 
   // Clock
   setInterval(() => {
-    ($('#status-clock') as HTMLElement).textContent = new Date().toLocaleTimeString();
+    const el = document.getElementById('status-clock');
+    if (el) el.textContent = new Date().toLocaleTimeString();
   }, 1000);
 
   // Grid resize
   window.addEventListener('resize', () => repositionAllCards());
+
+  console.log('[Shell] Buttons wired');
+
+  // NOW load data (async, with error handling)
+  loadData(themeSelect);
+});
+
+async function loadData(themeSelect: HTMLSelectElement): Promise<void> {
+  // Check if preload bridge is available
+  if (!window.api) {
+    console.error('[Shell] window.api is undefined — preload failed to load!');
+    ($('#empty-state') as HTMLElement).innerHTML = `
+      <p style="color:var(--color-down)">⚠️ Preload bridge not available</p>
+      <p>Check DevTools console for errors.</p>
+      <p style="font-size:11px; margin-top:8px">Ctrl+Shift+I → Console</p>
+    `;
+    return;
+  }
+
+  try {
+    sources = await window.api.getSources();
+    components = await window.api.getComponents();
+    tabs = await window.api.getTabs();
+    console.log(`[Shell] Loaded: ${sources.length} sources, ${components.length} components, ${tabs.length} tabs`);
+  } catch (err) {
+    console.error('[Shell] Failed to load data:', err);
+    ($('#empty-state') as HTMLElement).innerHTML = `
+      <p style="color:var(--color-down)">⚠️ Database error</p>
+      <p>${err}</p>
+    `;
+    return;
+  }
+
+  // Load saved theme
+  try {
+    const savedTheme = await window.api.getSetting('theme');
+    if (savedTheme) {
+      currentThemeIdx = THEMES.indexOf(savedTheme);
+      if (currentThemeIdx < 0) currentThemeIdx = 0;
+      applyTheme(THEMES[currentThemeIdx]);
+      themeSelect.value = THEMES[currentThemeIdx];
+    }
+  } catch { /* ignore theme load error */ }
+
+  // Render UI
+  renderSources();
+  renderComponents();
+  renderTabs();
+
+  // Select first tab
+  if (tabs.length > 0) {
+    await selectTab(tabs[0].id);
+  }
+
+  // Main process events
+  if (window.api.onCycleTheme) {
+    window.api.onCycleTheme(() => {
+      currentThemeIdx = (currentThemeIdx + 1) % THEMES.length;
+      applyTheme(THEMES[currentThemeIdx]);
+      themeSelect.value = THEMES[currentThemeIdx];
+      window.api.setSetting('theme', THEMES[currentThemeIdx]);
+    });
+  }
+
+  if (window.api.onReloadSources) {
+    window.api.onReloadSources(() => reloadAllSources());
+  }
 
   // Launch sources
   for (const src of sources) {
     if (src.auto_start) launchSource(src);
   }
 
-  console.log(`[Shell] Initialized: ${sources.length} sources, ${components.length} components, ${tabs.length} tabs`);
-});
+  console.log('[Shell] Fully initialized');
+}
 
 // ═══ THEME ═══
 
@@ -452,6 +488,7 @@ function toggleMode(): void {
 // ═══ DIALOGS ═══
 
 function showAddSourceDialog(): void {
+  console.log('[Dialog] Opening Add Source');
   const overlay = document.createElement('div');
   overlay.className = 'dialog-overlay';
   overlay.innerHTML = `
@@ -469,11 +506,16 @@ function showAddSourceDialog(): void {
   `;
   document.body.appendChild(overlay);
 
+  // Close on overlay background click
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) overlay.remove();
+  });
+
   overlay.querySelector('#dlg-cancel')!.addEventListener('click', () => overlay.remove());
   overlay.querySelector('#dlg-ok')!.addEventListener('click', async () => {
     const name = (document.getElementById('dlg-source-name') as HTMLInputElement).value.trim();
     const url = (document.getElementById('dlg-source-url') as HTMLInputElement).value.trim();
-    if (!name || !url) return;
+    if (!name || !url) { alert('Name and URL are required.'); return; }
 
     const src: Source = {
       id: crypto.randomUUID(),
@@ -483,17 +525,24 @@ function showAddSourceDialog(): void {
       auto_start: true,
     };
 
-    await window.api.upsertSource(src);
-    sources.push(src);
-    renderSources();
-    launchSource(src);
+    try {
+      await window.api.upsertSource(src);
+      sources.push(src);
+      renderSources();
+      launchSource(src);
+      console.log(`[Source] Added: ${name} → ${url}`);
+    } catch (err) {
+      console.error('[Source] Save failed:', err);
+      alert(`Failed to save source: ${err}`);
+    }
     overlay.remove();
   });
 }
 
 function showAddComponentDialog(): void {
+  console.log('[Dialog] Opening Add Component');
   if (sources.length === 0) {
-    alert('Add a source first.');
+    alert('Add a source first before creating components.');
     return;
   }
 
@@ -510,9 +559,9 @@ function showAddComponentDialog(): void {
       <input id="dlg-comp-title" placeholder="e.g., SSI Full Board" />
       <label>Render Mode</label>
       <select id="dlg-comp-mode">
-        <option value="WholeSite">WholeSite (full page)</option>
-        <option value="Crop">Crop (isolate element)</option>
-        <option value="Clone">Clone (mirror data)</option>
+        <option value="WholeSite">WholeSite (full page in card)</option>
+        <option value="Crop">Crop (isolate one element)</option>
+        <option value="Clone">Clone (mirror live data)</option>
       </select>
       <div class="dialog-actions">
         <button class="btn-cancel" id="dlg-cancel">Cancel</button>
@@ -521,6 +570,10 @@ function showAddComponentDialog(): void {
     </div>
   `;
   document.body.appendChild(overlay);
+
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) overlay.remove();
+  });
 
   overlay.querySelector('#dlg-cancel')!.addEventListener('click', () => overlay.remove());
   overlay.querySelector('#dlg-ok')!.addEventListener('click', async () => {
@@ -537,26 +590,33 @@ function showAddComponentDialog(): void {
       selectors: '[]',
     };
 
-    await window.api.upsertComponent(comp);
-    components.push(comp);
-    renderComponents();
+    try {
+      await window.api.upsertComponent(comp);
+      components.push(comp);
+      renderComponents();
+      console.log(`[Component] Created: ${title} (${type})`);
 
-    // Auto-place on current tab
-    if (activeTabId) {
-      const placement: Placement = {
-        id: crypto.randomUUID(),
-        tab_id: activeTabId,
-        component_id: comp.id,
-        col: 0, row: 0,
-        col_span: type === 'WholeSite' ? 6 : 3,
-        row_span: type === 'WholeSite' ? 4 : 2,
-      };
+      // Auto-place on current tab
+      if (activeTabId) {
+        const placement: Placement = {
+          id: crypto.randomUUID(),
+          tab_id: activeTabId,
+          component_id: comp.id,
+          col: findNextFreeCol(),
+          row: 0,
+          col_span: type === 'WholeSite' ? 6 : 3,
+          row_span: type === 'WholeSite' ? 4 : 2,
+        };
 
-      await window.api.upsertPlacement(placement);
-      placements.push(placement);
-      renderCards();
+        await window.api.upsertPlacement(placement);
+        placements.push(placement);
+        renderCards();
+        console.log(`[Placement] Placed at col=${placement.col}, row=${placement.row}`);
+      }
+    } catch (err) {
+      console.error('[Component] Save failed:', err);
+      alert(`Failed to save component: ${err}`);
     }
-
     overlay.remove();
   });
 }
@@ -578,6 +638,17 @@ function esc(text: string): string {
   const el = document.createElement('span');
   el.textContent = text;
   return el.innerHTML;
+}
+
+function findNextFreeCol(): number {
+  // Find the rightmost occupied column, place new card after it
+  let maxRight = 0;
+  for (const p of placements) {
+    const right = p.col + p.col_span;
+    if (right > maxRight) maxRight = right;
+  }
+  // Wrap to next row if no room
+  return maxRight >= GRID_COLS ? 0 : maxRight;
 }
 
 function uuid(): string {
