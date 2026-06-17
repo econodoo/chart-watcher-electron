@@ -390,6 +390,8 @@ function toggleMode(): void {
 // ═══ CONFIGURE WORKSPACE ═══
 function openConfigureWorkspace(p: Placement, comp: Component): void {
   const src = sources.find(s => s.id === comp.source_id); if (!src) return;
+  const originalSelectors = comp.selectors; // Save for cancel/revert
+
   const overlay = document.createElement('div'); overlay.className = 'workspace-overlay';
   overlay.innerHTML = `
     <div class="workspace-toolbar">
@@ -397,6 +399,7 @@ function openConfigureWorkspace(p: Placement, comp: Component): void {
       <div class="workspace-controls">
         ${comp.type === 'Crop' ? '<button id="ws-pick" class="btn-primary">🎯 Pick Element to Crop</button>' : ''}
         <button id="ws-reload" class="btn-cancel">↻ Reload</button>
+        <button id="ws-cancel" class="btn-cancel">✕ Cancel</button>
         <button id="ws-done" class="btn-primary">✓ Done</button>
       </div>
     </div>
@@ -404,45 +407,117 @@ function openConfigureWorkspace(p: Placement, comp: Component): void {
     <div class="workspace-status"><span id="ws-status">Loading ${esc(src.name)}…</span></div>`;
   document.body.appendChild(overlay);
 
+  const wsBody = overlay.querySelector('.workspace-body')!;
   const wv = document.createElement('webview') as any;
-  wv.setAttribute('src', src.entry_url); wv.setAttribute('partition', src.partition_key || `persist:${src.id}`);
+  wv.setAttribute('src', src.entry_url);
+  wv.setAttribute('partition', src.partition_key || `persist:${src.id}`);
   try { wv.setAttribute('preload', `file://${window.api.getWebviewPreloadPath()}`); } catch {}
   wv.style.cssText = 'width:100%;height:100%;';
-  wv.addEventListener('dom-ready', async () => { const s = document.getElementById('ws-status'); if (s) s.textContent = `${src.name} — Ready`; await injectAgent(wv, src.name); });
-  overlay.querySelector('.workspace-body')!.appendChild(wv);
 
-  overlay.querySelector('#ws-done')!.addEventListener('click', () => { overlay.remove(); renderCards(); });
-  overlay.querySelector('#ws-reload')?.addEventListener('click', () => { wv.reload(); const s = document.getElementById('ws-status'); if (s) s.textContent = 'Reloading…'; });
+  // Track if agent is injected (needed for re-injection on reload)
+  let agentReady = false;
+
+  wv.addEventListener('dom-ready', async () => {
+    const s = document.getElementById('ws-status');
+    if (s) s.textContent = `${src.name} — Ready`;
+    agentReady = false;
+    await injectAgent(wv, src.name);
+    agentReady = true;
+    if (s) s.textContent = `${src.name} — Ready (agent loaded)`;
+  });
+
+  wsBody.appendChild(wv);
+
+  // Done = save changes and close
+  overlay.querySelector('#ws-done')!.addEventListener('click', () => {
+    overlay.remove(); renderCards();
+    toast('Configuration saved', 'success');
+  });
+
+  // Cancel = revert changes and close
+  overlay.querySelector('#ws-cancel')!.addEventListener('click', () => {
+    comp.selectors = originalSelectors; // Revert
+    window.api.upsertComponent(comp);
+    overlay.remove(); renderCards();
+    toast('Changes cancelled', 'info');
+  });
+
+  // Reload = reload page AND re-inject agent
+  overlay.querySelector('#ws-reload')?.addEventListener('click', () => {
+    wv.reload();
+    agentReady = false;
+    const s = document.getElementById('ws-status');
+    if (s) s.textContent = 'Reloading… (agent will re-inject automatically)';
+  });
+
+  // Escape key closes workspace
+  const onEscWorkspace = (e: KeyboardEvent) => {
+    // Only close workspace on Escape if picker is NOT active
+    // (picker handles its own Escape)
+    if (e.key === 'Escape' && !pickingActive) {
+      comp.selectors = originalSelectors;
+      window.api.upsertComponent(comp);
+      overlay.remove(); renderCards();
+      document.removeEventListener('keydown', onEscWorkspace);
+      toast('Closed without saving', 'info');
+    }
+  };
+  document.addEventListener('keydown', onEscWorkspace);
 
   // Crop picker
-  const pickBtn = overlay.querySelector('#ws-pick');
+  let pickingActive = false;
+  const pickBtn = overlay.querySelector('#ws-pick') as HTMLButtonElement | null;
   if (pickBtn) {
     pickBtn.addEventListener('click', () => {
-      const s = document.getElementById('ws-status'); if (s) s.textContent = '🎯 Click any element on the page to select it for cropping. ESC to cancel.';
-      (pickBtn as HTMLButtonElement).disabled = true; (pickBtn as HTMLButtonElement).textContent = '🎯 Picking…';
+      if (!agentReady) { toast('Wait for page to finish loading', 'error'); return; }
+
+      const s = document.getElementById('ws-status');
+      if (s) s.textContent = '🎯 Hover to highlight · ↑↓ parent/child · ←→ siblings · Enter to select · Esc to cancel';
+      pickBtn.disabled = true;
+      pickBtn.textContent = '🎯 Picking… (hover + arrows + Enter)';
+      pickingActive = true;
+
+      // Enter picker mode in the webview
       wv.send('agent-command', { cmd: 'enterPick' });
+
       const handler = (ev: any) => {
         if (ev.channel !== 'agent-message') return;
         const msg = ev.args[0];
+
         if (msg.evt === 'picked') {
           wv.removeEventListener('ipc-message', handler);
+          pickingActive = false;
           comp.selectors = JSON.stringify([msg.cascade]);
           window.api.upsertComponent(comp);
-          wv.send('agent-command', { cmd: 'exitPick' });
-          (pickBtn as HTMLButtonElement).disabled = false; (pickBtn as HTMLButtonElement).textContent = '🎯 Pick Element to Crop';
-          const css = msg.cascade?.find((s: any) => s.strategy === 'css')?.expression || 'element';
-          if (s) s.textContent = `✓ Cropped to: ${css}`;
+          pickBtn.disabled = false;
+          pickBtn.textContent = '🎯 Pick Element to Crop';
+          const cssExpr = msg.cascade?.find((s: any) => s.strategy === 'css')?.expression || 'element';
+          if (s) s.textContent = `✓ Cropped to: ${cssExpr} — Click Done to apply, or pick again`;
+          toast(`Element selected: ${cssExpr}`, 'success');
+          // Apply crop preview in the workspace
           applyCropCss(wv, comp);
-          toast(`Crop selector saved: ${css}`, 'success');
-        } else if (msg.evt === 'pickCancelled') {
+        }
+
+        if (msg.evt === 'pickCancelled') {
           wv.removeEventListener('ipc-message', handler);
-          (pickBtn as HTMLButtonElement).disabled = false; (pickBtn as HTMLButtonElement).textContent = '🎯 Pick Element to Crop';
-          if (s) s.textContent = 'Pick cancelled.';
+          pickingActive = false;
+          pickBtn.disabled = false;
+          pickBtn.textContent = '🎯 Pick Element to Crop';
+          if (s) s.textContent = 'Pick cancelled — element not changed';
         }
       };
       wv.addEventListener('ipc-message', handler);
     });
   }
+
+  // Clean up escape listener when overlay is removed
+  const obs = new MutationObserver(() => {
+    if (!document.body.contains(overlay)) {
+      document.removeEventListener('keydown', onEscWorkspace);
+      obs.disconnect();
+    }
+  });
+  obs.observe(document.body, { childList: true });
 }
 
 // ═══ DIALOGS ═══
