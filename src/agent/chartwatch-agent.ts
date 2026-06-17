@@ -261,16 +261,32 @@
   }
 
   // ── Crop ──
-  function doCrop(cascade: SelectorStep[]): void {
-    // Remove any previous crop
+  let currentCropCascade: SelectorStep[] | null = null;
+  let cropRetryTimer: number | null = null;
+
+  function doCrop(cascade: SelectorStep[], attempt: number = 0): void {
+    // Clear any pending retry
+    if (cropRetryTimer) { clearTimeout(cropRetryTimer); cropRetryTimer = null; }
+    currentCropCascade = cascade;
+
+    // Undo previous crop first
     undoCrop();
 
     const el = resolve(cascade);
-    if (!el) { send({ evt: 'cropFailed', reason: 'Element not found' }); return; }
+    if (!el) {
+      // Target not found — retry with increasing delay (page might still be loading)
+      const delays = [2000, 5000, 10000];
+      if (attempt < delays.length) {
+        const delay = delays[attempt];
+        send({ evt: 'cropRetrying', attempt: attempt + 1, delay });
+        cropRetryTimer = window.setTimeout(() => doCrop(cascade, attempt + 1), delay);
+      } else {
+        send({ evt: 'cropFailed', reason: 'Element not found after retries' });
+      }
+      return;
+    }
 
-    // Strategy: walk from target UP to body.
-    // At each level, hide ALL siblings (display:none).
-    // This leaves only the target's ancestor chain visible.
+    // Walk from target UP to body, hide all siblings at each level
     const hiddenEls: HTMLElement[] = [];
     let current: Element | null = el;
 
@@ -290,24 +306,17 @@
       current = parent;
     }
 
-    // Clean up body
     document.body.style.setProperty('margin', '0', 'important');
     document.body.style.setProperty('padding', '0', 'important');
     document.body.style.setProperty('overflow', 'auto', 'important');
-
-    // Mark target for identification
     (el as HTMLElement).dataset.cwCropTarget = 'true';
-
-    // Scroll into view
     el.scrollIntoView({ block: 'start' });
-
-    // Store hidden elements for undo
     (window as any).__cw_hidden__ = hiddenEls;
-
     send({ evt: 'cropApplied', count: hiddenEls.length });
   }
 
   function undoCrop(): void {
+    if (cropRetryTimer) { clearTimeout(cropRetryTimer); cropRetryTimer = null; }
     const hidden: HTMLElement[] = (window as any).__cw_hidden__ || [];
     for (const el of hidden) {
       el.style.removeProperty('display');
@@ -318,7 +327,10 @@
     document.body.style.removeProperty('margin');
     document.body.style.removeProperty('padding');
     document.body.style.removeProperty('overflow');
-    document.getElementById('__cw_crop__')?.remove();
+  }
+
+  function reapplyCrop(): void {
+    if (currentCropCascade) doCrop(currentCropCascade, 0);
   }
 
   // ── Bridge ──
@@ -335,6 +347,7 @@
       case 'showSelection': if (m.cascade) showStaticHighlight(m.cascade); break;
       case 'previewCrop': if (m.cascade) doCrop(m.cascade); break;
       case 'applyCrop': if (m.cascade) doCrop(m.cascade); break;
+      case 'reapplyCrop': reapplyCrop(); break;
       case 'undoCrop': undoCrop(); break;
     }
   });

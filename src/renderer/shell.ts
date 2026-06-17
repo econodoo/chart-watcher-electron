@@ -204,6 +204,7 @@ function buildCard(p: Placement, comp: Component): HTMLDivElement {
         <button class="card-btn" data-act="zoom-out" title="Zoom out">−</button>
         <span class="card-zoom-label">${Math.round(zoom * 100)}%</span>
         <button class="card-btn" data-act="zoom-in" title="Zoom in">+</button>
+        ${comp.type === 'Crop' ? '<button class="card-btn" data-act="reapply" title="Reapply crop">↻</button>' : ''}
         <button class="card-btn" data-act="configure" title="Configure">⚙</button>
         <button class="card-btn card-btn-close" data-act="remove" title="Remove">×</button>
       </div>
@@ -220,6 +221,7 @@ function buildCard(p: Placement, comp: Component): HTMLDivElement {
     else if (act === 'zoom-out') changeZoom(p.id, -1);
     else if (act === 'configure') openConfigureWorkspace(p, comp);
     else if (act === 'remove') removeCard(p.id);
+    else if (act === 'reapply') reapplyCropOnCard(card);
   }));
 
   card.addEventListener('click', () => selectCard(p.id));
@@ -259,10 +261,18 @@ async function applyCropCss(wv: any, comp: Component): Promise<void> {
   if (sels.length === 0) return;
   // Inject the agent first (it handles the crop command)
   await injectAgent(wv, 'crop-card');
-  // Send crop command via the preload bridge
+  // Delay to let page finish dynamic loading, then apply crop
+  // Agent will auto-retry at 2s, 5s, 10s if element not found yet
   setTimeout(() => {
     try { wv.send('agent-command', { cmd: 'applyCrop', cascade: sels[0] }); } catch {}
-  }, 500);
+  }, 1500);
+}
+
+function reapplyCropOnCard(card: HTMLElement): void {
+  const wv = card.querySelector('webview') as any;
+  if (!wv) return;
+  try { wv.send('agent-command', { cmd: 'reapplyCrop' }); } catch {}
+  toast('Crop reapplied', 'info');
 }
 
 function sendCloneObserve(comp: Component): void {
