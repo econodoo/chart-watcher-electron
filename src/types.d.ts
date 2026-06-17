@@ -41,6 +41,8 @@ interface ChartWatcherApi {
   deletePlacement(id: string): Promise<{ ok: boolean }>;
   getSetting(key: string): Promise<string | null>;
   setSetting(key: string, val: string): Promise<{ ok: boolean }>;
+  getWebviewPreloadPath(): string;
+  getAgentJsPath(): string;
   onCycleTheme(cb: () => void): void;
   onReloadSources(cb: () => void): void;
 }

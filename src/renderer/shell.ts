@@ -140,22 +140,23 @@ function updateSourceStatus(sourceId: string, status: 'ready' | 'loading' | 'err
 // ═══ WEBVIEW SOURCE MANAGEMENT ═══
 
 const sourceWebviews = new Map<string, HTMLElement>();
+let cachedAgentCode: string | null = null;
 
 function launchSource(src: Source): void {
   if (sourceWebviews.has(src.id)) return;
 
-  const host = $('#webview-host');
-  const wv = document.createElement('webview');
+  const host = document.getElementById('webview-host')!;
+  const wv = document.createElement('webview') as any;
   wv.setAttribute('src', src.entry_url);
   wv.setAttribute('partition', src.partition_key || `persist:${src.id}`);
-  wv.setAttribute('preload', `file://${getPreloadPath('webview-preload.js')}`);
+  wv.setAttribute('preload', `file://${window.api.getWebviewPreloadPath()}`);
   wv.setAttribute('webpreferences', 'contextIsolation=yes');
   wv.style.width = '1px';
   wv.style.height = '1px';
 
   wv.addEventListener('dom-ready', () => {
     updateSourceStatus(src.id, 'ready');
-    injectAgent(wv);
+    injectAgent(wv, src.name);
     console.log(`[Source] ${src.name} loaded`);
   });
 
@@ -169,9 +170,6 @@ function launchSource(src: Source): void {
     if (event.channel === 'agent-message') {
       handleAgentMessage(src.id, event.args[0]);
     }
-    if (event.channel === 'preload-ready') {
-      console.log(`[Source] ${src.name} preload ready`);
-    }
   });
 
   host.appendChild(wv);
@@ -179,33 +177,28 @@ function launchSource(src: Source): void {
   updateSourceStatus(src.id, 'loading');
 }
 
-function injectAgent(wv: HTMLElement): void {
-  // Read and inject the agent script
-  const agentCode = getAgentCode();
-  (wv as any).executeJavaScript(agentCode).catch((err: Error) => {
-    console.error('[Agent] Injection failed:', err);
-  });
-}
-
-function getAgentCode(): string {
-  // The compiled agent code — loaded inline for simplicity
-  // In production, read from dist/agent/chartwatch-agent.js
-  return `
-    // Agent will be loaded via preload bridge
-    console.log('[ChartWatch Agent] Ready');
-  `;
-}
-
-function getPreloadPath(filename: string): string {
-  // Resolve preload path relative to dist
-  const basePath = window.location.pathname.replace('/renderer/index.html', '');
-  return basePath + '/preload/' + filename;
+async function injectAgent(wv: any, name: string): Promise<void> {
+  try {
+    // Load agent code from compiled file (via Node.js fs through a trick:
+    // we use webview's executeJavaScript to inject the IIFE agent)
+    // The agent code is the compiled chartwatch-agent.js
+    if (!cachedAgentCode) {
+      // Fetch the agent JS via file:// URL
+      const agentPath = window.api.getAgentJsPath();
+      const resp = await fetch(`file://${agentPath}`);
+      cachedAgentCode = await resp.text();
+    }
+    await wv.executeJavaScript(cachedAgentCode);
+    console.log(`[Agent] Injected into ${name}`);
+  } catch (err) {
+    console.error(`[Agent] Injection failed for ${name}:`, err);
+  }
 }
 
 function sendToSource(sourceId: string, command: Record<string, any>): void {
-  const wv = sourceWebviews.get(sourceId);
+  const wv = sourceWebviews.get(sourceId) as any;
   if (!wv) return;
-  (wv as any).send('agent-command', command);
+  wv.send('agent-command', command);
 }
 
 function reloadAllSources(): void {
@@ -348,9 +341,10 @@ function createCard(placement: Placement, comp: Component): HTMLDivElement {
     if (src) {
       const body = card.querySelector('.card-body')!;
       body.innerHTML = '';
-      const wv = document.createElement('webview');
+      const wv = document.createElement('webview') as any;
       wv.setAttribute('src', src.entry_url);
       wv.setAttribute('partition', src.partition_key || `persist:${src.id}`);
+      wv.setAttribute('preload', `file://${window.api.getWebviewPreloadPath()}`);
       wv.style.width = '100%';
       wv.style.height = '100%';
       wv.addEventListener('dom-ready', () => {

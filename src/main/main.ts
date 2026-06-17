@@ -25,8 +25,8 @@ function createWindow(): BrowserWindow {
     },
   });
 
-  // Load the shell HTML
-  win.loadFile(path.join(__dirname, '../renderer/index.html'));
+  // Load the shell HTML (static file in src/renderer/)
+  win.loadFile(path.join(__dirname, '../../src/renderer/index.html'));
 
   // Show when ready (avoids white flash)
   win.once('ready-to-show', () => {

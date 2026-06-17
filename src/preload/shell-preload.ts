@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import path from 'path';
 
 contextBridge.exposeInMainWorld('api', {
   // ── Database ──
@@ -12,6 +13,10 @@ contextBridge.exposeInMainWorld('api', {
   deletePlacement: (id: string) => ipcRenderer.invoke('db:delete-placement', id),
   getSetting: (key: string) => ipcRenderer.invoke('db:get-setting', key),
   setSetting: (key: string, val: string) => ipcRenderer.invoke('db:set-setting', key, val),
+
+  // ── Paths (for webview preload) ──
+  getWebviewPreloadPath: () => path.join(__dirname, 'webview-preload.js'),
+  getAgentJsPath: () => path.join(__dirname, '..', 'agent', 'chartwatch-agent.js'),
 
   // ── Events from main ──
   onCycleTheme: (cb: () => void) => ipcRenderer.on('cycle-theme', cb),
