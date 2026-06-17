@@ -34,6 +34,7 @@ document.addEventListener('DOMContentLoaded', () => {
   $('#btn-toggle-right').addEventListener('click', () => $('#right-panel').classList.toggle('collapsed'));
   $('#btn-add-tab').addEventListener('click', addTab);
   $('#btn-recrop').addEventListener('click', recropAll);
+  $('#btn-uncrop').addEventListener('click', uncropAll);
   $('#btn-apply-layout').addEventListener('click', applyLayoutChanges);
   $('#btn-delete-card').addEventListener('click', () => selectedCardId && removeCard(selectedCardId));
   $('#btn-configure-card')?.addEventListener('click', () => {
@@ -216,7 +217,10 @@ function buildCard(p: Placement, comp: Component): HTMLDivElement {
         <button class="card-btn" data-act="zoom-out" title="Zoom out">−</button>
         <span class="card-zoom-label">${Math.round(zoom * 100)}%</span>
         <button class="card-btn" data-act="zoom-in" title="Zoom in">+</button>
-        ${comp.type === 'Crop' ? '<button class="card-btn" data-act="reapply" title="Reapply crop">↻</button>' : ''}
+        ${comp.type === 'Crop' ? `
+          <button class="card-btn" data-act="uncrop" title="Uncrop — show full page to navigate">👁</button>
+          <button class="card-btn" data-act="reapply" title="Reapply crop">↻</button>
+        ` : ''}
         <button class="card-btn" data-act="configure" title="Configure">⚙</button>
         <button class="card-btn card-btn-close" data-act="remove" title="Remove">×</button>
       </div>
@@ -234,6 +238,7 @@ function buildCard(p: Placement, comp: Component): HTMLDivElement {
     else if (act === 'configure') openConfigureWorkspace(p, comp);
     else if (act === 'remove') removeCard(p.id);
     else if (act === 'reapply') reapplyCropOnCard(card);
+    else if (act === 'uncrop') uncropCard(card);
   }));
 
   card.addEventListener('click', () => selectCard(p.id));
@@ -285,6 +290,13 @@ function reapplyCropOnCard(card: HTMLElement): void {
   if (!wv) return;
   try { wv.send('agent-command', { cmd: 'reapplyCrop' }); } catch {}
   toast('Crop reapplied', 'info');
+}
+
+function uncropCard(card: HTMLElement): void {
+  const wv = card.querySelector('webview') as any;
+  if (!wv) return;
+  try { wv.send('agent-command', { cmd: 'undoCrop' }); } catch {}
+  toast('Uncropped — navigate the page, then ↻ to recrop', 'info');
 }
 
 function sendCloneObserve(comp: Component): void {
@@ -402,7 +414,7 @@ function extendDashboard(): void {
   overlay.style.minHeight = `${totalH}px`;
 }
 
-// ═══ RECROP ALL ═══
+// ═══ RECROP / UNCROP ALL ═══
 function recropAll(): void {
   let count = 0;
   document.querySelectorAll('.card').forEach(card => {
@@ -414,6 +426,19 @@ function recropAll(): void {
     try { wv.send('agent-command', { cmd: 'reapplyCrop' }); count++; } catch {}
   });
   toast(`Recrop applied to ${count} card${count !== 1 ? 's' : ''}`, 'info');
+}
+
+function uncropAll(): void {
+  let count = 0;
+  document.querySelectorAll('.card').forEach(card => {
+    const compId = (card as HTMLElement).dataset.componentId;
+    const comp = components.find(c => c.id === compId);
+    if (comp?.type !== 'Crop') return;
+    const wv = card.querySelector('webview') as any;
+    if (!wv) return;
+    try { wv.send('agent-command', { cmd: 'undoCrop' }); count++; } catch {}
+  });
+  toast(`Uncropped ${count} card${count !== 1 ? 's' : ''} — navigate then ↻ Recrop`, 'info');
 }
 
 function repositionAllCards(): void { placements.forEach(p => { const c = document.getElementById(`card-${p.id}`); if (c) positionCard(c, p); }); extendDashboard(); }
